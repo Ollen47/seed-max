@@ -11,6 +11,9 @@ SeedSigner Max (v4): battery and power switch on the carrier PCB.
 
 All of this is read-only information or a one-way "off" switch: nothing here can send
 data anywhere.
+
+v5 has no carrier (hw_profile.HAS_CARRIER = False): every function here is then a no-op
+and the battery monitor never starts, so these pins are left alone.
 """
 import logging
 import time
@@ -37,7 +40,7 @@ def _gpio():
 
 def is_battery_low() -> bool:
     GPIO = _gpio()
-    if GPIO is None or not hw_profile.is_max_profile():
+    if GPIO is None or not hw_profile.has_carrier():
         return False
     # External 47 kOhm pull-up on the carrier: no internal pull needed
     GPIO.setup(hw_profile.PIN_BATT_LOW, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
@@ -47,7 +50,7 @@ def is_battery_low() -> bool:
 
 def is_usb_power_connected() -> bool:
     GPIO = _gpio()
-    if GPIO is None or not hw_profile.is_max_profile():
+    if GPIO is None or not hw_profile.has_carrier():
         return False
     GPIO.setup(hw_profile.PIN_CHG_PG, GPIO.IN, pull_up_down=GPIO.PUD_OFF)
     return GPIO.input(hw_profile.PIN_CHG_PG) == GPIO.LOW
@@ -60,7 +63,7 @@ def power_off():
     bench setup powered from USB without the switch).
     """
     GPIO = _gpio()
-    if GPIO is None or not hw_profile.is_max_profile():
+    if GPIO is None or not hw_profile.has_carrier():
         return
     logger.info("Cutting power")
     GPIO.setup(hw_profile.PIN_PWR_OFF, GPIO.OUT, initial=GPIO.LOW)
@@ -92,7 +95,7 @@ class BatteryMonitor(Singleton, BaseThread):
 
 
     def start_monitoring(self):
-        if hw_profile.is_max_profile() and _gpio() is not None:
+        if hw_profile.has_carrier() and _gpio() is not None:
             self.start()
 
 

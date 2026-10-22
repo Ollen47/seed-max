@@ -53,12 +53,12 @@ class Renderer(ConfigurableSingleton):
         if Settings.get_instance().get_value(SettingsConstants.SETTING__DISPLAY_COLOR_INVERTED, default_if_none=True) == SettingsConstants.OPTION__ENABLED:
             self.disp.invert()
 
-        if self.display_type in [DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ST7796]:
-            # ST7796 driver already exposes a landscape 480x320 surface
+        if self.display_type in [DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ST7796, DISPLAY_TYPE__ILI9486]:
+            # The ST7796 and ILI9486 drivers already expose a landscape 480x320 surface
             self.canvas_width = self.disp.width
             self.canvas_height = self.disp.height
 
-        elif self.display_type in [DISPLAY_TYPE__ILI9341, DISPLAY_TYPE__ILI9486]:
+        elif self.display_type in [DISPLAY_TYPE__ILI9341]:
             # Swap for the natively portrait-oriented displays
             self.canvas_width = self.disp.height
             self.canvas_height = self.disp.width

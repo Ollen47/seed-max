@@ -177,6 +177,64 @@ def test_st7796_driver():
     check([c.args[0][0] for c in spi.writebytes.call_args_list] == [0x21], "'Invert colors' flips the TN default (INVOFF -> INVON)")
 
 
+def test_ili9486_driver():
+    """ v5 panel: Waveshare 3.5inch RPi LCD (A), 16-bit words through its SPI converter """
+    import spidev
+    import RPi.GPIO as GPIO
+    from seedsigner.hardware.displays.display_driver import DisplayDriverFactory, DISPLAY_TYPE__ILI9486
+    from seedsigner.models.settings_definition import SettingsDefinition
+
+    check(SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__DISPLAY_CONFIGURATION).default_value == "ili9486_480x320",
+          "v5 profile boots on the ILI9486 480x320 panel")
+
+    spi = MagicMock()
+    spidev.SpiDev = MagicMock(return_value=spi)
+    GPIO.setup = MagicMock()
+    disp = DisplayDriverFactory.instantiate_display_driver(DISPLAY_TYPE__ILI9486, width=480, height=320)
+    check(spidev.SpiDev.call_args.args == (0, 0), "ILI9486 on SPI0 CE0")
+    check(spi.max_speed_hz == 16_000_000, "ILI9486 SPI clock 16 MHz (converter-limited default)")
+    check((disp.width, disp.height) == (480, 320), "ILI9486 exposes a 480x320 landscape surface")
+    pins = sorted(c.args[0] for c in GPIO.setup.call_args_list)
+    check(pins == [18, 22], f"only RS (pin 18) and RST (pin 22) are driven, no backlight pin: {pins}")
+
+    transfers = [list(c.args[0]) for c in spi.writebytes.call_args_list + spi.writebytes2.call_args_list]
+    check(all(len(t) % 2 == 0 for t in transfers), "every transfer is whole 16-bit words")
+    check(all(t[0::2] == [0] * (len(t) // 2) for t in transfers), "commands and parameters are sent as (0x00, byte) words")
+    commands = [c.args[0][1] for c in spi.writebytes.call_args_list]
+    check(commands[:2] == [0xB0, 0x11] and commands[-1] == 0x29, f"init: interface mode, sleep out ... display on: {[hex(c) for c in commands]}")
+    params = [list(c.args[0]) for c in spi.writebytes2.call_args_list]
+    check([0, 0x55] in params, "16 bits per pixel")
+    check([0, 0xE8] in params, "MADCTL 0xE8: landscape as the Linux driver's rotation 0")
+
+    spi.reset_mock()
+    disp.show_image(Image.new("RGB", (480, 320), (255, 0, 0)))
+    params = [list(c.args[0]) for c in spi.writebytes2.call_args_list]
+    check([0, 0, 0, 0, 0, 0x01, 0, 0xDF] in params and [0, 0, 0, 0, 0, 0x01, 0, 0x3F] in params,
+          "window 0..479 x 0..319, as 16-bit words")
+    frame = spi.writebytes2.call_args_list[-1].args[0]
+    check(len(frame) == 480 * 320 * 2 and frame[:2] == bytes([0xF8, 0x00]), "full frame of 307200 bytes, big-endian RGB565")
+
+    spi.reset_mock()
+    disp.invert(enabled=True)
+    check([list(c.args[0]) for c in spi.writebytes.call_args_list] == [[0, 0x21]], "'Invert colors' = INVON")
+
+
+def test_boot_calibration_view():
+    from seedsigner.views.settings_views import TouchCalibrationView, SettingsMenuView
+    from seedsigner.views.view import MainMenuView
+    check(hw_profile.TOUCH_CALIBRATE_AT_BOOT is True, "the first v5 image calibrates the touch screen at boot")
+    hw, _ = setup_inputs()
+    saved = hw.touch_device
+    hw.touch_device = None
+    hw.touch_device_failed = True            # no panel: the view must not get stuck
+    try:
+        check(TouchCalibrationView(at_boot=True).run().View_cls == MainMenuView, "boot calibration continues to the main menu")
+        check(TouchCalibrationView().run().View_cls == SettingsMenuView, "from Settings it goes back to Settings")
+    finally:
+        hw.touch_device = saved
+        hw.touch_device_failed = False
+
+
 def test_xpt2046_driver():
     import spidev
     import RPi.GPIO as GPIO
@@ -642,6 +700,32 @@ def test_power_pins():
     GPIO.OUT = "out"
     levels = {hw_profile.PIN_BATT_LOW: 1, hw_profile.PIN_CHG_PG: 1}
     GPIO.input = lambda pin: levels.get(pin, 1)
+
+    # v5 (no carrier, PiSugar 3 Air): the power pins are never touched
+    check(hw_profile.HAS_CARRIER is False and not hw_profile.has_carrier(), "v5 profile: no carrier PCB")
+    GPIO.setup = MagicMock()
+    GPIO.output = MagicMock()
+    levels[hw_profile.PIN_BATT_LOW] = 0
+    levels[hw_profile.PIN_CHG_PG] = 0
+    sleep = power.time.sleep
+    power.time.sleep = lambda s: None
+    power.power_off()
+    check(not power.is_battery_low() and not power.is_usb_power_connected()
+          and not GPIO.setup.called and not GPIO.output.called,
+          "without the carrier, battery and power-off pins are left alone (floating inputs can't raise alarms)")
+    levels[hw_profile.PIN_BATT_LOW] = 1
+    levels[hw_profile.PIN_CHG_PG] = 1
+    power.time.sleep = sleep
+
+    # v4 carrier
+    hw_profile.HAS_CARRIER = True
+    try:
+        _test_carrier_power_pins(GPIO, power, levels)
+    finally:
+        hw_profile.HAS_CARRIER = False
+
+
+def _test_carrier_power_pins(GPIO, power, levels):
     check(not power.is_battery_low() and not power.is_usb_power_connected(), "both inputs idle high")
     levels[hw_profile.PIN_BATT_LOW] = 0
     levels[hw_profile.PIN_CHG_PG] = 0
@@ -676,7 +760,9 @@ def test_io_test_screen_touch():
 if __name__ == "__main__":
     TestRenderer.configure_instance()
     test_st7796_driver()
+    test_ili9486_driver()
     test_xpt2046_driver()
+    test_boot_calibration_view()
     test_menu_tap()
     test_back_and_power()
     test_input_guard()

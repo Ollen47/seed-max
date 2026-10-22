@@ -293,6 +293,13 @@ class Controller(Singleton):
                 next_destination = initial_destination
             else:
                 next_destination = Destination(MainMenuView)
+
+                # SeedSigner Max: calibrate the touch screen before the first menu, while
+                # the image doesn't carry this panel's calibration yet (see hw_profile.py)
+                from seedsigner.hardware import hw_profile
+                if hw_profile.is_max_profile() and hw_profile.TOUCH_CALIBRATE_AT_BOOT:
+                    from seedsigner.views.settings_views import TouchCalibrationView
+                    next_destination = Destination(TouchCalibrationView, view_args={"at_boot": True})
             
             # Set up our one-time toast notification tip to remove the SD card
             if self.settings.get_value(SettingsConstants.SETTING__MICROSD_TOAST_TIMER) == SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS:

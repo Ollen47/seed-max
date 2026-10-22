@@ -363,12 +363,25 @@ class TouchCalibrationView(View):
     SeedSigner is stateless, so the result isn't saved: the screen shows the six values
     to copy into `hw_profile.TOUCH_CALIBRATION` before building your own image. The new
     calibration only stays active if "Keep" can be tapped with it.
+
+    `at_boot`: started by the Controller before the main menu (see
+    hw_profile.TOUCH_CALIBRATE_AT_BOOT); returns to the main menu instead of Settings.
     """
+    def __init__(self, at_boot: bool = False):
+        super().__init__()
+        self.at_boot = at_boot
+
+
     def run(self):
         from seedsigner.hardware.buttons import HardwareButtons
+        if self.at_boot:
+            done = Destination(MainMenuView)
+        else:
+            done = Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
+
         device = HardwareButtons.get_instance()._get_touch_device()
         if device is None:
-            return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
+            return done
 
         result = self.run_screen(settings_screens.TouchCalibrationScreen)
         if result is not None:
@@ -384,7 +397,7 @@ class TouchCalibrationView(View):
                 # "Discard", or nothing could be tapped before the timeout
                 device.calibration = previous
 
-        return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
+        return done
 
 
 

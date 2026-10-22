@@ -47,6 +47,11 @@ class BaseTest:
         # Mock out the loading screen so it can't spawn. View classes must import locally!
         patch('seedsigner.gui.screens.screen.LoadingScreenThread').start()
 
+        # SeedSigner Max: flows start at the main menu, not at the boot-time touch
+        # calibration (tested on its own in tests/test_seedsigner_max.py)
+        from seedsigner.hardware import hw_profile
+        hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
+
         # Instantiate the mocked MicroSD; hold on to the instance so tests can manipulate
         # it later.
         cls.mock_microsd = BaseTest.MockMicroSD()

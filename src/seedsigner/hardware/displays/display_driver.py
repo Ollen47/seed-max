@@ -96,5 +96,9 @@ class DisplayDriverFactory:
             return ST7796(_width=width, _height=height)
 
         elif display_type == DISPLAY_TYPE__ILI9486:
-            # TODO: improve performance of ili9486 driver
-            raise Exception("ILI9486 display not implemented yet")
+            # SeedSigner Max v5: Waveshare 3.5inch RPi LCD (A), see ili9486.py
+            if (width, height) != (480, 320):
+                raise ValueError("ILI9486 display only supports 480x320 resolution")
+            from seedsigner.hardware.displays.ili9486 import ILI9486
+            # The driver configures the natively portrait panel as landscape itself
+            return ILI9486(_width=width, _height=height)

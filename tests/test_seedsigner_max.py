@@ -226,3 +226,28 @@ def test_touch_screens_in_isolation(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[FAIL]" not in result.stdout
     assert (tmp_path / "max_menu_hold_progress.png").exists()
+
+
+
+# ---------------------------------------------------------------------------------------
+# v5: Waveshare 3.5inch RPi LCD (A)
+# ---------------------------------------------------------------------------------------
+def test_ili9486_words():
+    """ Every byte becomes a 16-bit word for the board's SPI-to-parallel converter """
+    import sys
+    from unittest.mock import MagicMock
+    sys.modules.setdefault("RPi", MagicMock())
+    sys.modules.setdefault("RPi.GPIO", MagicMock())
+    sys.modules.setdefault("spidev", MagicMock())
+    from seedsigner.hardware.displays.ili9486 import words
+    assert words([0x2A]) == [0x00, 0x2A]
+    assert words([0x01, 0xDF, 0x1FF]) == [0x00, 0x01, 0x00, 0xDF, 0x00, 0xFF]
+
+
+def test_v5_profile():
+    from seedsigner.hardware import hw_profile
+    assert hw_profile.is_max_profile()
+    assert hw_profile.DISPLAY_CONFIGURATION == "ili9486_480x320"
+    assert not hw_profile.has_carrier()
+    # Display and touch pins of the Waveshare 3.5" (A) don't collide
+    assert {hw_profile.ILI9486_PIN_DC, hw_profile.ILI9486_PIN_RST}.isdisjoint({hw_profile.TOUCH_PIN_IRQ, 19, 21, 23, 24, 26})
