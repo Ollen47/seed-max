@@ -1305,7 +1305,7 @@ class ResetScreen(BaseTopNavScreen):
 @dataclass
 class PowerOffScreen(BaseTopNavScreen):
     """
-    SeedSigner Max: shown while the Pololu switch cuts the power. Returns after a few
+    SeedSigner Max: shown while the power switch (MAX16054) cuts the power. Returns after a few
     seconds only if the power is still on (a bench setup without the switch).
     """
     def __post_init__(self):

@@ -2,12 +2,12 @@
 SeedSigner Max (v4): battery and power switch on the carrier PCB.
 
 - PIN_BATT_LOW: an LM393 comparator with a TLV431 reference pulls it LOW when the cell
-  drops below ~3.45 V (roughly the last 10-15% of charge). Plain digital input: the
+  drops below ~3.41 V (roughly the last 10% of charge). Plain digital input: the
   Pi has no ADC, and no fuel-gauge chip is needed (or wanted) for this.
-- PIN_CHG_PG: the BQ24074 charger's PGOOD, LOW while a USB cable is connected.
-- PIN_PWR_OFF: the OFF input of the Pololu #2808 switch. HIGH cuts the power to the
-  whole device. SeedSigner OS runs entirely from RAM, so cutting the power is also what
-  wipes the seed from memory.
+- PIN_CHG_PG: the BQ24072 charger's PGOOD, LOW while a USB cable is connected.
+- PIN_PWR_OFF: the CLEAR input of the MAX16054 on/off controller. HIGH switches the
+  5 V boost off and with it the whole device. SeedSigner OS runs entirely from RAM, so
+  cutting the power is also what wipes the seed from memory.
 
 All of this is read-only information or a one-way "off" switch: nothing here can send
 data anywhere.
@@ -56,7 +56,7 @@ def is_usb_power_connected() -> bool:
 
 def power_off():
     """
-    Cut the power through the Pololu switch. Returns only if that didn't happen (e.g. a
+    Cut the power through the MAX16054. Returns only if that didn't happen (e.g. a
     bench setup powered from USB without the switch).
     """
     GPIO = _gpio()

@@ -13,8 +13,8 @@ and easy to change before building your own image.
     ACTIVE_PROFILE = PROFILE__MAX       -> 4.0" ST7796S 480x320 + XPT2046 resistive touch
 
 SeedSigner Max v4 hardware: Raspberry Pi Zero v1.3, LCDwiki MSP4021 (4.0" 480x320
-ST7796S panel with an XPT2046 resistive touch controller), LiPo cell with a BQ24074
-charger, Pololu #2808 power switch and a TPS61023 5 V boost. No joystick, no KEY1-3:
+ST7796S panel with an XPT2046 resistive touch controller), LiPo cell with a BQ24072
+charger, a MAX16054 pushbutton on/off controller and a TPS61023 5 V boost. No joystick, no KEY1-3:
 the touch screen is the only input.
 
 All pin numbers below use the physical header numbering (GPIO.BOARD), the same
@@ -89,14 +89,14 @@ TOUCH_CALIBRATION = (
 # ---------------------------------------------------------------------------------------
 # Power (carrier PCB)
 # ---------------------------------------------------------------------------------------
-# Battery-low comparator (LM393 + TLV431, ~3.45 V on the cell): LOW = battery low
+# Battery-low comparator (LM393 + TLV431, ~3.41 V on the cell): LOW = battery low
 PIN_BATT_LOW = 15                    # BCM 22, 47 kOhm pull-up to 3V3 on the carrier
 
-# Pololu #2808 OFF input: driving it HIGH cuts the power. A 100 kOhm pull-down on the
+# MAX16054 CLEAR input: driving it HIGH switches the 5 V boost off, i.e. cuts the power. A 100 kOhm pull-down on the
 # carrier keeps the device on while the Pi boots and its pins float.
 PIN_PWR_OFF = 16                     # BCM 23
 
-# BQ24074 PGOOD: LOW = USB cable connected (charging or charged)
+# BQ24072 PGOOD: LOW = USB cable connected (charging or charged)
 PIN_CHG_PG = 32                      # BCM 12, 47 kOhm pull-up to 3V3 on the carrier
 
 

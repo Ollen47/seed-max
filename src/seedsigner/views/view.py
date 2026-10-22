@@ -287,7 +287,7 @@ class PowerOffView(View):
         from seedsigner.hardware import hw_profile
 
         if hw_profile.is_max_profile() and not self.renderer.is_screenshot_generator:
-            # SeedSigner Max: really switch off (Pololu #2808), which also wipes the RAM
+            # SeedSigner Max: really switch off (MAX16054 CLEAR), which also wipes the RAM
             from seedsigner.gui.screens.screen import PowerOffScreen
             PowerOffView.PowerOffThread().start()
             self.run_screen(PowerOffScreen)
