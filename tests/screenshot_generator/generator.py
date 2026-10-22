@@ -7,7 +7,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from PIL import ImageFont
+from PIL import Image, ImageFont
 from unittest.mock import Mock, patch, MagicMock
 
 from embit import compact
@@ -124,8 +124,14 @@ class SeedExportXpubQR_ScreenBrightnessView(seed_views.SeedExportXpubQRDisplayVi
 
         def _render(self):
             from seedsigner.gui.screens.screen import QRDisplayScreen
-            image = self.qr_encoder.part_to_image(self.qr_encoder.cur_part(), 240, 240, border=2, background_color="white")
+            # Same layout as QRDisplayThread: largest square that fits, centered on black
+            qr_size = min(self.canvas_width, self.canvas_height)
+            image = self.qr_encoder.part_to_image(self.qr_encoder.cur_part(), qr_size, qr_size, border=2, background_color="white")
             QRDisplayScreen.QRDisplayThread.render_brightness_tip(None, image)
+            if image.size != (self.canvas_width, self.canvas_height):
+                frame = Image.new("RGB", (self.canvas_width, self.canvas_height), "black")
+                frame.paste(image.convert("RGB"), (int((self.canvas_width - qr_size) / 2), int((self.canvas_height - qr_size) / 2)))
+                image = frame
             self.renderer.show_image(image)
 
     def run(self):

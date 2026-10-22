@@ -3,6 +3,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Any, List
 
+from seedsigner.hardware import hw_profile
 from seedsigner.helpers.l10n import mark_for_translation as _mft
 
 import logging
@@ -362,10 +363,12 @@ class SettingsConstants:
     DISPLAY_CONFIGURATION__ST7789__320x240 = "st7789_320x240"    # natively portrait dimensions; we apply a 90° rotation
     DISPLAY_CONFIGURATION__ILI9341__320x240 = "ili9341_320x240"  # natively portrait dimensions; we apply a 90° rotation
     DISPLAY_CONFIGURATION__ILI9486__480x320 = "ili9486_480x320"  # natively portrait dimensions; we apply a 90° rotation
+    DISPLAY_CONFIGURATION__ST7796__480x320 = "st7796_480x320"    # SeedSigner Max; driver sets landscape via MADCTL
     ALL_DISPLAY_CONFIGURATIONS = [
         (DISPLAY_CONFIGURATION__ST7789__240x240, "st7789 240x240"),
         (DISPLAY_CONFIGURATION__ST7789__320x240, "st7789 320x240"),
         (DISPLAY_CONFIGURATION__ILI9341__320x240, "ili9341 320x240 (beta)"),
+        (DISPLAY_CONFIGURATION__ST7796__480x320, "st7796 480x320"),
         # (DISPLAY_CONFIGURATION__ILI9486__320x480, "ili9486 480x320"),  # TODO: Enable when ili9486 driver performance is improved
     ]
 
@@ -726,7 +729,8 @@ class SettingsDefinition:
                       type=SettingsConstants.TYPE__SELECT_1,
                       visibility=SettingsConstants.VISIBILITY__HARDWARE,
                       selection_options=SettingsConstants.ALL_DISPLAY_CONFIGURATIONS,
-                      default_value=SettingsConstants.DISPLAY_CONFIGURATION__ST7789__240x240),
+                      # The hardware profile is baked into the image at build time (see hw_profile.py)
+                      default_value=SettingsConstants.DISPLAY_CONFIGURATION__ST7796__480x320 if hw_profile.is_max_profile() else SettingsConstants.DISPLAY_CONFIGURATION__ST7789__240x240),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
                       attr_name=SettingsConstants.SETTING__DISPLAY_COLOR_INVERTED,

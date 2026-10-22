@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw
 from threading import Lock
 
-from seedsigner.hardware.displays.display_driver import ALL_DISPLAY_TYPES, DISPLAY_TYPE__ILI9341, DISPLAY_TYPE__ILI9486, DISPLAY_TYPE__ST7789, DisplayDriverFactory
+from seedsigner.hardware.displays.display_driver import ALL_DISPLAY_TYPES, DISPLAY_TYPE__ILI9341, DISPLAY_TYPE__ILI9486, DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ST7796, DisplayDriverFactory
 from seedsigner.models.settings import Settings
 from seedsigner.models.settings_definition import SettingsConstants
 from seedsigner.models.singleton import ConfigurableSingleton
@@ -53,7 +53,8 @@ class Renderer(ConfigurableSingleton):
         if Settings.get_instance().get_value(SettingsConstants.SETTING__DISPLAY_COLOR_INVERTED, default_if_none=True) == SettingsConstants.OPTION__ENABLED:
             self.disp.invert()
 
-        if self.display_type == DISPLAY_TYPE__ST7789:
+        if self.display_type in [DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ST7796]:
+            # ST7796 driver already exposes a landscape 480x320 surface
             self.canvas_width = self.disp.width
             self.canvas_height = self.disp.height
 

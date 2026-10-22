@@ -839,10 +839,15 @@ class QRDisplayScreen(BaseScreen):
                 # convert the self.qr_brightness integer (31-255) into hex triplets
                 hex_color = (hex(self.qr_brightness.cur_count).split('x')[1]) * 3
 
+                # SeedSigner Max: the QR code was hard-coded to 240x240 and drawn in the
+                # top-left corner, over whatever the previous screen left on a larger
+                # display. Use the largest square that fits and center it on black.
+                qr_size = min(self.renderer.canvas_width, self.renderer.canvas_height)
+
                 # Display the brightness tips toast
                 duration = 10 ** 9 * 1.2  # 1.2 seconds
                 if is_brightness_tip_enabled and time.time_ns() - self.tips_start_time.cur_count < duration:
-                    image = self.qr_encoder.part_to_image(self.qr_encoder.cur_part(), 240, 240, border=2, background_color=hex_color)
+                    image = self.qr_encoder.part_to_image(self.qr_encoder.cur_part(), qr_size, qr_size, border=2, background_color=hex_color)
                     self.render_brightness_tip(image)
                     pending_encoder_restart = True
                 else:
@@ -852,7 +857,12 @@ class QRDisplayScreen(BaseScreen):
                         # brightness tip is stowed.
                         self.qr_encoder.restart()
                         pending_encoder_restart = False
-                    image = self.qr_encoder.next_part_image(240, 240, border=2, background_color=hex_color)
+                    image = self.qr_encoder.next_part_image(qr_size, qr_size, border=2, background_color=hex_color)
+
+                if image.size != (self.renderer.canvas_width, self.renderer.canvas_height):
+                    frame = Image.new("RGB", (self.renderer.canvas_width, self.renderer.canvas_height), GUIConstants.BACKGROUND_COLOR)
+                    frame.paste(image.convert("RGB"), (int((frame.width - image.width) / 2), int((frame.height - image.height) / 2)))
+                    image = frame
 
                 with self.renderer.lock:
                     self.renderer.show_image(image)

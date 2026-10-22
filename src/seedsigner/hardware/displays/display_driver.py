@@ -4,8 +4,9 @@ from dataclasses import dataclass
 DISPLAY_TYPE__ST7789 = "st7789"
 DISPLAY_TYPE__ILI9341 = "ili9341"
 DISPLAY_TYPE__ILI9486 = "ili9486"
+DISPLAY_TYPE__ST7796 = "st7796"   # SeedSigner Max: 3.5"/4.0" 480x320 SPI panels
 
-ALL_DISPLAY_TYPES = [DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ILI9341, DISPLAY_TYPE__ILI9486]
+ALL_DISPLAY_TYPES = [DISPLAY_TYPE__ST7789, DISPLAY_TYPE__ILI9341, DISPLAY_TYPE__ILI9486, DISPLAY_TYPE__ST7796]
 
     
 
@@ -87,6 +88,13 @@ class DisplayDriverFactory:
             display.begin()
             return display
         
+        elif display_type == DISPLAY_TYPE__ST7796:
+            if (width, height) != (480, 320):
+                raise ValueError("ST7796 display only supports 480x320 resolution")
+            from seedsigner.hardware.displays.st7796 import ST7796
+            # The driver configures the natively portrait panel as landscape itself
+            return ST7796(_width=width, _height=height)
+
         elif display_type == DISPLAY_TYPE__ILI9486:
             # TODO: improve performance of ili9486 driver
             raise Exception("ILI9486 display not implemented yet")

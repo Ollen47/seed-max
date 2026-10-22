@@ -32,9 +32,11 @@ class ScreenshotRenderer(Renderer):
         renderer = cls.__new__(cls)
         cls._instance = renderer
 
-        # Hard-coding output values for now
-        renderer.canvas_width = 240
-        renderer.canvas_height = 240
+        # Default 240x240; override with e.g. SEEDSIGNER_SCREENSHOT_RESOLUTION=480x320
+        resolution = os.environ.get("SEEDSIGNER_SCREENSHOT_RESOLUTION", "240x240")
+        width, height = resolution.lower().split("x")
+        renderer.canvas_width = int(width)
+        renderer.canvas_height = int(height)
 
         renderer.canvas = Image.new('RGB', (renderer.canvas_width, renderer.canvas_height))
         renderer.draw = ImageDraw.Draw(renderer.canvas)

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from gettext import gettext as _
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+from seedsigner.hardware import hw_profile
 from typing import Any, List, Tuple
 
 from seedsigner.gui.renderer import Renderer
@@ -105,6 +107,9 @@ class GUIConstants:
     BUTTON_FONT_COLOR = "#FCFCFC"
     BUTTON_BACKGROUND_COLOR = "#2C2C2C"
     BUTTON_HEIGHT = 32
+    if hw_profile.is_max_profile():
+        # SeedSigner Max: bigger touch targets on the 4.0" panel (see hw_profile.py)
+        BUTTON_HEIGHT = hw_profile.TOUCH_BUTTON_HEIGHT
     BUTTON_SELECTED_FONT_COLOR = BACKGROUND_COLOR
     
     NOTIFICATION_COLOR = "#00F100"
