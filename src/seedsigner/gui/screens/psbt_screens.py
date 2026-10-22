@@ -764,6 +764,9 @@ class PSBTOpReturnScreen(ButtonListScreen):
 
 @dataclass
 class PSBTFinalizeScreen(ButtonListScreen):
+    # SeedSigner Max: irreversible action, the finger must be held (see ButtonListScreen)
+    requires_hold_to_confirm = True
+
     def __post_init__(self):
         # Customize defaults
         self.title = _("Sign Transaction")

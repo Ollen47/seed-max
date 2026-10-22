@@ -10,8 +10,10 @@ from seedsigner.gui.components import Button, CheckboxButton, CheckedSelectionBu
 from seedsigner.gui.screens.scan_screens import ScanScreen
 from seedsigner.gui.screens.screen import BaseScreen, BaseTopNavScreen, ButtonListScreen, ButtonOption
 from seedsigner.hardware.buttons import HardwareButtonsConstants
+from seedsigner.hardware.touch import TouchEvent
 from seedsigner.hardware.camera import Camera
 from seedsigner.models.settings import SettingsConstants
+from seedsigner.models.threads import BaseThread
 
 
 
@@ -171,6 +173,38 @@ class IOTestScreen(BaseTopNavScreen):
             is_scrollable_text=False,  # No help for l10n, but currently ScrollableTextLine interferes with the small button's left edge. (TODO:)
         )
         self.components.append(self.key3_button)
+
+
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: the on-screen pictograms become buttons (camera / clear / exit on
+        the right, the d-pad on the left). A tap anywhere else draws a small cross where
+        the touch was read: a quick check of the touch calibration.
+        """
+        from seedsigner.gui.screens.screen import component_rect
+        from seedsigner.hardware.touch import rect_contains
+        if not event.is_tap:
+            return None
+        targets = (
+            (self.key1_button, HardwareButtonsConstants.KEY1),
+            (self.key2_button, HardwareButtonsConstants.KEY2),
+            (self.key3_button, HardwareButtonsConstants.KEY3),
+            (self.joystick_click_button, HardwareButtonsConstants.KEY_PRESS),
+            (self.joystick_up_button, HardwareButtonsConstants.KEY_UP),
+            (self.joystick_down_button, HardwareButtonsConstants.KEY_DOWN),
+            (self.joystick_left_button, HardwareButtonsConstants.KEY_LEFT),
+            (self.joystick_right_button, HardwareButtonsConstants.KEY_RIGHT),
+        )
+        for button, code in targets:
+            if rect_contains(component_rect(button), event.x, event.y, margin=int(GUIConstants.COMPONENT_PADDING / 2)):
+                return code
+
+        with self.renderer.lock:
+            size = 6
+            self.image_draw.line((event.x - size, event.y, event.x + size, event.y), fill=GUIConstants.ACCENT_COLOR, width=2)
+            self.image_draw.line((event.x, event.y - size, event.x, event.y + size), fill=GUIConstants.ACCENT_COLOR, width=2)
+            self.renderer.show_image()
+        return None
 
 
     def _run(self):
@@ -344,3 +378,172 @@ class SettingsQRConfirmationScreen(ButtonListScreen):
             auto_line_break=True,
             screen_y=start_y
         ))
+
+
+
+@dataclass
+class TouchCalibrationScreen(BaseScreen):
+    """
+    SeedSigner Max: four-point touch calibration.
+
+    Shows a cross near each corner in turn; the user presses its center. The raw ADC
+    readings are collected straight from the XPT2046 (no calibration applied), the
+    median of each press is kept, and an affine transform is fitted to the four points
+    by least squares. Returns (TouchCalibration, max_error_px), or None if the user
+    stops touching the screen for TIMEOUT_S (e.g. opened it by mistake).
+    """
+    TARGET_INSET = 40              # px from the screen edges
+    MIN_SAMPLES = 8                # stable readings before a press counts (~80 ms)
+    MAX_SAMPLES = 25
+    TIMEOUT_S = 30
+
+    def __post_init__(self):
+        super().__post_init__()
+        inset = self.TARGET_INSET
+        self.targets = [
+            (inset, inset),
+            (self.canvas_width - inset, inset),
+            (self.canvas_width - inset, self.canvas_height - inset),
+            (inset, self.canvas_height - inset),
+        ]
+        self.instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_body_font_size())
+
+
+    def _render_target(self, index: int):
+        x, y = self.targets[index]
+        self.clear_screen()
+        size = 14
+        self.image_draw.ellipse((x - size, y - size, x + size, y + size), outline=GUIConstants.ACCENT_COLOR, width=2)
+        self.image_draw.line((x - 2 * size, y, x + 2 * size, y), fill=GUIConstants.ACCENT_COLOR, width=2)
+        self.image_draw.line((x, y - 2 * size, x, y + 2 * size), fill=GUIConstants.ACCENT_COLOR, width=2)
+        self.image_draw.text(
+            (int(self.canvas_width / 2), int(self.canvas_height / 2) - GUIConstants.COMPONENT_PADDING),
+            _("Touch calibration") + f"  {index + 1}/{len(self.targets)}",
+            fill=GUIConstants.BODY_FONT_COLOR, font=self.instructions_font, anchor="ms")
+        self.image_draw.text(
+            (int(self.canvas_width / 2), int(self.canvas_height / 2) + 2 * GUIConstants.COMPONENT_PADDING + 4),
+            _("Press the center of the cross"),
+            fill=GUIConstants.LABEL_FONT_COLOR, font=self.instructions_font, anchor="ms")
+
+
+    def _render(self):
+        self._render_target(0)
+
+
+    def _wait_release(self, device, deadline: float) -> bool:
+        """ Wait for ~100 ms without contact """
+        clear = 0
+        while time.time() < deadline:
+            clear = clear + 1 if device.read_raw() is None else 0
+            if clear >= 10:
+                return True
+            time.sleep(0.01)
+        return False
+
+
+    def _read_press(self, device, deadline: float):
+        """ Median raw (x, y) of one deliberate press, or None on timeout """
+        samples = []
+        while time.time() < deadline:
+            raw = device.read_raw()
+            if raw is None:
+                if len(samples) >= self.MIN_SAMPLES:
+                    break
+                samples = []        # too short: a bounce, not a press
+            else:
+                samples.append(raw[:2])
+                if len(samples) >= self.MAX_SAMPLES:
+                    break
+            time.sleep(0.01)
+        if len(samples) < self.MIN_SAMPLES:
+            return None
+        xs = sorted(s[0] for s in samples)
+        ys = sorted(s[1] for s in samples)
+        return (xs[len(xs) // 2], ys[len(ys) // 2])
+
+
+    def _run(self):
+        from seedsigner.hardware.touch import TouchCalibration
+        device = self.hw_inputs._get_touch_device()
+        if device is None:
+            return None
+
+        raw_points = []
+        for index in range(len(self.targets)):
+            if index > 0:
+                with self.renderer.lock:
+                    self._render_target(index)
+                    self.renderer.show_image()
+
+            deadline = time.time() + self.TIMEOUT_S
+            # The finger that opened this screen, or pressed the previous cross, must go first
+            if not self._wait_release(device, deadline):
+                return None
+            point = self._read_press(device, deadline)
+            if point is None:
+                return None
+            raw_points.append(point)
+
+        # Don't let the last press leak into the next screen as a tap
+        self.hw_inputs.touch_require_release = True
+
+        try:
+            calibration = TouchCalibration.solve(raw_points, self.targets)
+        except ValueError:
+            return None
+        return (calibration, calibration.max_error(raw_points, self.targets))
+
+
+
+@dataclass
+class TouchCalibrationResultScreen(ButtonListScreen):
+    """
+    SeedSigner Max: the new calibration is already active while this screen is shown,
+    so reaching "Keep" proves it works. If nothing is chosen within CONFIRM_TIMEOUT_S
+    (e.g. the new calibration is so wrong the buttons can't be hit) it returns "timeout"
+    and the view restores the previous calibration.
+    """
+    CONFIRM_TIMEOUT_S = 15
+    calibration_values: tuple = None
+    max_error_px: float = 0.0
+
+    def __post_init__(self):
+        self.title = _("Touch calibration")
+        self.show_back_button = False
+        self.is_bottom_list = True
+        self.button_data = [ButtonOption("Keep"), ButtonOption("Discard")]
+        super().__post_init__()
+
+        a, b, c, d, e, f = self.calibration_values
+        self.components.append(TextArea(
+            text=_("Max error: {} px").format(round(self.max_error_px, 1)),
+            screen_y=self.top_nav.height,
+        ))
+        self.components.append(TextArea(
+            # The six values to copy into hw_profile.TOUCH_CALIBRATION
+            text=f"{a:.5f}, {b:.5f}, {c:.2f},\n{d:.5f}, {e:.5f}, {f:.2f}",
+            font_name=GUIConstants.FIXED_WIDTH_FONT_NAME,
+            font_color=GUIConstants.LABEL_FONT_COLOR,
+            screen_y=self.components[-1].screen_y + self.components[-1].height + GUIConstants.COMPONENT_PADDING,
+        ))
+        self.deadline = time.time() + self.CONFIRM_TIMEOUT_S
+        self.threads.append(TouchCalibrationResultScreen.TimeoutThread(self))
+
+
+    class TimeoutThread(BaseThread):
+        def __init__(self, screen):
+            super().__init__()
+            self.screen = screen
+
+        def run(self):
+            while self.keep_running:
+                if time.time() >= self.screen.deadline:
+                    self.screen.hw_inputs.trigger_override()
+                    return
+                time.sleep(0.1)
+
+
+    def _run_callback(self):
+        if time.time() >= self.deadline:
+            return "timeout"
+        return None

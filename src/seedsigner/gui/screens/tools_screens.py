@@ -10,6 +10,7 @@ from seedsigner.gui.components import FontAwesomeIconConstants, Fonts, GUIConsta
 
 from seedsigner.gui.screens.screen import RET_CODE__BACK_BUTTON, BaseScreen, ButtonListScreen, ButtonOption, KeyboardScreen
 from seedsigner.hardware.buttons import HardwareButtonsConstants
+from seedsigner.hardware.touch import TouchEvent
 from seedsigner.models.settings_definition import SettingsConstants, SettingsDefinition
 
 
@@ -26,6 +27,18 @@ class ToolsImageEntropyLivePreviewScreen(BaseScreen):
         # TODO: Figure out why (camera expecting frame dims of multiples other than 16?)
         max_dimension = max(self.canvas_width, self.canvas_height)
         self.camera.start_video_stream_mode(resolution=(max_dimension, max_dimension), framerate=24, format="rgb")
+
+
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: "< back | click a button" is drawn along the bottom edge. A tap
+        on its left half goes back; a tap anywhere else takes the picture.
+        """
+        if not event.is_tap:
+            return None
+        if event.y > self.canvas_height * 0.6 and event.x < self.canvas_width / 2:
+            return HardwareButtonsConstants.KEY_LEFT
+        return HardwareButtonsConstants.KEY_PRESS
 
 
     def _run(self):
@@ -124,6 +137,12 @@ class ToolsImageEntropyLivePreviewScreen(BaseScreen):
 @dataclass
 class ToolsImageEntropyFinalImageScreen(BaseScreen):
     final_image: Image = None
+
+    def handle_touch(self, event: TouchEvent):
+        """ SeedSigner Max: "< reshoot | accept >": tap the left half or the right half """
+        if not event.is_tap:
+            return None
+        return HardwareButtonsConstants.KEY_LEFT if event.x < self.canvas_width / 2 else HardwareButtonsConstants.KEY_RIGHT
 
     def _run(self):
         instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())

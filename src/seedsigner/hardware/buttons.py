@@ -1,14 +1,21 @@
 import logging
-from typing import List
+from typing import Callable, List
 import RPi.GPIO as GPIO
 import time
 
+from seedsigner.hardware.touch import TouchEvent, TouchTracker
 from seedsigner.models.singleton import Singleton
 
 logger = logging.getLogger(__name__)
 
 
 class HardwareButtons(Singleton):
+    # SeedSigner Max (v4, touch screen)
+    INPUT_GUARD_MS = 400          # touch ignored this long after a screen appears, then until lifted
+    HOLD_TO_CONFIRM_MS = 1000     # irreversible actions need the finger held this long
+    HOLD_MARGIN_PX = 12           # the finger may wander this far outside the button while holding
+    TOUCH_CODE_TTL_MS = 300       # touch codes kept for `check_for_low()` polling loops
+
     if GPIO.RPI_INFO['P1_REVISION'] == 3: #This indicates that we have revision 3 GPIO
         logger.info("Detected 40pin GPIO (Raspberry Pi 2 and above)")
         KEY_UP_PIN = 31
@@ -61,7 +68,122 @@ class HardwareButtons(Singleton):
             cls._instance.first_repeat_threshold = 225  # Long-press time required before returning continuous input
             cls._instance.next_repeat_threshold = 250  # Amount of time where we no longer consider input a continuous hold
 
+            # SeedSigner Max: touch screen state (see `begin_screen()` and `poll_touch()`)
+            cls._instance.touch_device = None          # XPT2046, created on first use
+            cls._instance.touch_device_failed = False
+            cls._instance.touch_tracker = TouchTracker()
+            cls._instance.touch_handler = None
+            cls._instance.touch_screen_started = 0
+            cls._instance.touch_require_release = False
+            cls._instance.touch_pending_codes = []
+
         return cls._instance
+
+
+    # -----------------------------------------------------------------------------------
+    # SeedSigner Max: touch screen
+    # -----------------------------------------------------------------------------------
+    def _get_touch_device(self):
+        """
+        The XPT2046 driver, created on first use. None on the stock profile, or if the
+        controller can't be opened (then the joystick, if wired, still works).
+        """
+        if self.touch_device is None and not self.touch_device_failed:
+            from seedsigner.hardware import hw_profile
+            if not hw_profile.is_max_profile():
+                self.touch_device_failed = True
+                return None
+            try:
+                from seedsigner.hardware.xpt2046 import XPT2046
+                self.touch_device = XPT2046()
+            except Exception as e:
+                logger.exception(f"Touch controller not available: {e}")
+                self.touch_device_failed = True
+        return self.touch_device
+
+
+    def begin_screen(self, touch_handler: Callable = None):
+        """
+        Called by `BaseScreen.display()` every time a screen appears.
+
+        `touch_handler(event)` is the screen's own translation of a `TouchEvent` into
+        one of the key codes its `_run()` loop understands (or None to ignore it).
+
+        Starts the input guard: touches are ignored for a short window, and then until
+        the finger is lifted, so the press that confirmed the previous screen (or the
+        second tap of an accidental double tap) can never act on the new one.
+        """
+        self.touch_handler = touch_handler
+        self.touch_screen_started = int(time.time() * 1000)
+        self.touch_require_release = True
+        self.touch_pending_codes = []
+
+
+    def poll_touch(self) -> List[TouchEvent]:
+        """ Read the panel once and return the resulting touch events, after the guard """
+        device = self._get_touch_device()
+        if device is None:
+            return []
+
+        point = device.read()
+        now = int(time.time() * 1000)
+        events = self.touch_tracker.feed(point, now)
+        if point is not None:
+            # A finger on the panel counts as activity (screensaver)
+            self.last_input_time = now
+
+        if self.touch_require_release:
+            if now - self.touch_screen_started >= self.INPUT_GUARD_MS and point is None and not self.touch_tracker.is_pressed:
+                self.touch_require_release = False
+            return []
+
+        return events
+
+
+    def _touch_codes(self, events: List[TouchEvent]) -> List[int]:
+        """ The current screen's key codes for these events """
+        codes = []
+        if self.touch_handler is None:
+            return codes
+        for event in events:
+            code = self.touch_handler(event)
+            if code is not None:
+                codes.append(code)
+        return codes
+
+
+    def track_touch_hold(self, rect: tuple, duration_ms: int = None, progress_callback: Callable = None) -> bool:
+        """
+        The finger just landed on a button that needs a hold (an irreversible action):
+        returns True once it has stayed on `rect` for `duration_ms`, False as soon as it
+        is lifted or slides away. `progress_callback(progress)` gets 0.0-1.0 while it
+        is held, and None when it was let go early, so the screen can draw a filling bar.
+        """
+        from seedsigner.hardware.touch import rect_contains
+        duration_ms = duration_ms or self.HOLD_TO_CONFIRM_MS
+        callback = progress_callback or (lambda progress: None)
+        device = self._get_touch_device()
+        started = int(time.time() * 1000)
+        while True:
+            now = int(time.time() * 1000)
+            point = device.read() if device else None
+            self.touch_tracker.feed(point, now)
+            position = self.touch_tracker.position
+            if position is None or not rect_contains(rect, position[0], position[1], margin=self.HOLD_MARGIN_PX):
+                callback(None)
+                # Whatever the finger does next (still down and sliding, or the release
+                # itself) must not count as a tap somewhere else
+                self.touch_require_release = True
+                return False
+
+            elapsed = now - started
+            callback(min(1.0, elapsed / duration_ms))
+            if elapsed >= duration_ms:
+                # The next screen's guard waits for this finger to be lifted
+                self.touch_require_release = True
+                self.last_input_time = now
+                return True
+            time.sleep(0.02)
 
 
     def wait_for(self, keys=[]) -> int:
@@ -93,8 +215,18 @@ class HardwareButtons(Singleton):
                 #   input register in the resumed UI.
                 time.sleep(self.next_repeat_threshold / 1000.0)
 
+                # SeedSigner Max: the touch that woke the screen must not tap anything
+                self.touch_screen_started = int(time.time() * 1000)
+                self.touch_require_release = True
+
                 # Resume from a fresh loop
                 continue
+
+            # SeedSigner Max: touch screen, translated by the current screen
+            for code in self._touch_codes(self.poll_touch()):
+                if code in keys:
+                    self.cur_input = None
+                    return code
 
             # Check each candidate key to see if it was pressed
             for key in keys:
@@ -153,8 +285,20 @@ class HardwareButtons(Singleton):
             if self.GPIO.input(key) == self.GPIO.LOW:
                 self.update_last_input_time()
                 return True
-        else:
-            return False
+
+        # SeedSigner Max: the camera screens poll this instead of calling wait_for().
+        # Taps are translated by the screen as usual and kept for a moment, because such
+        # a loop asks about different keys in successive calls.
+        now = int(time.time() * 1000)
+        for code in self._touch_codes(self.poll_touch()):
+            self.touch_pending_codes.append((code, now))
+        self.touch_pending_codes = [(c, t) for (c, t) in self.touch_pending_codes if now - t < self.TOUCH_CODE_TTL_MS]
+        for i, (code, _) in enumerate(self.touch_pending_codes):
+            if code in keys:
+                del self.touch_pending_codes[i]
+                self.update_last_input_time()
+                return True
+        return False
 
 
     def has_any_input(self) -> bool:
@@ -162,6 +306,12 @@ class HardwareButtons(Singleton):
         for key in HardwareButtonsConstants.ALL_KEYS:
             if self.GPIO.input(key) == GPIO.LOW:
                 return True
+
+        # SeedSigner Max: a finger on the panel. Only the PENIRQ line is read here (no
+        # SPI): this is also called from the toast thread.
+        device = self.touch_device
+        if device is not None and device.is_touched():
+            return True
         return False
 
 

@@ -13,6 +13,7 @@ from seedsigner.gui.components import (GUIConstants,
     SeedSignerIconConstants, TopNav, TextArea, load_image)
 from seedsigner.gui.keyboard import Keyboard, TextEntryDisplay
 from seedsigner.hardware.buttons import HardwareButtonsConstants, HardwareButtons
+from seedsigner.hardware.touch import TouchEvent, rect_contains
 from seedsigner.models.encode_qr import BaseQrEncoder
 from seedsigner.models.settings import SettingsConstants
 from seedsigner.models.threads import BaseThread, ThreadsafeCounter
@@ -24,6 +25,12 @@ logger = logging.getLogger(__name__)
 #   screens with buttons.
 RET_CODE__BACK_BUTTON = 1000
 RET_CODE__POWER_BUTTON = 1001
+
+
+def component_rect(component) -> tuple[int, int, int, int]:
+    """ SeedSigner Max: on-screen (x1, y1, x2, y2) of a component, scroll included """
+    top = component.screen_y - getattr(component, "scroll_y", 0)
+    return (component.screen_x, top, component.screen_x + component.width, top + component.height)
 
 
 
@@ -57,8 +64,24 @@ class BaseScreen(BaseComponent):
         return threads
 
 
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: translate a touch into one of the key codes this screen's own
+        `_run()` loop already understands, or None to ignore it.
+
+        Called by HardwareButtons from inside `wait_for()` / `check_for_low()`, so the
+        screens keep their navigation logic unchanged: a tap on a button selects it (and
+        redraws it highlighted, for feedback) and answers KEY_PRESS, exactly what the
+        joystick would have done in two steps. Never called with the Renderer lock held.
+        """
+        return None
+
+
     def display(self) -> Any:
         try:
+            # SeedSigner Max: route the touch screen to this screen, start the input guard
+            self.hw_inputs.begin_screen(touch_handler=self.handle_touch)
+
             with self.renderer.lock:
                 self._render()
                 self.renderer.show_image()
@@ -230,6 +253,33 @@ class BaseTopNavScreen(BaseScreen):
         self.components.append(self.top_nav)
 
 
+    # SeedSigner Max: the back and power buttons are 32 px icons (~5.6 mm); their touch
+    # zones span the whole top nav height and 80 px (~14 mm) from the screen edge.
+    TOP_NAV_TOUCH_WIDTH = 80
+
+    def is_back_touch(self, x: int, y: int) -> bool:
+        return self.top_nav.show_back_button and y <= self.top_nav.height and x <= self.TOP_NAV_TOUCH_WIDTH
+
+
+    def is_power_touch(self, x: int, y: int) -> bool:
+        return self.top_nav.show_power_button and y <= self.top_nav.height and x >= self.canvas_width - self.TOP_NAV_TOUCH_WIDTH
+
+
+    def touch_top_nav(self, event: TouchEvent):
+        """ KEY_PRESS with the top nav selected, if `event` is a tap on back or power """
+        if not event.is_tap or not (self.is_back_touch(event.x, event.y) or self.is_power_touch(event.x, event.y)):
+            return None
+        with self.renderer.lock:
+            self.top_nav.is_selected = True
+            self.top_nav.render_buttons()
+            self.renderer.show_image()
+        return HardwareButtonsConstants.KEY_PRESS
+
+
+    def handle_touch(self, event: TouchEvent):
+        return self.touch_top_nav(event)
+
+
     def _run(self):
         while True:
             if not self.top_nav.show_back_button and not self.top_nav.show_power_button:
@@ -309,6 +359,11 @@ class ButtonListScreen(BaseTopNavScreen):
     # Params for version of list used for Settings
     Button_cls = Button
     checked_buttons: List[int] = None
+
+    # SeedSigner Max: irreversible actions (sign, export) need the finger held on the
+    # button for a second, not a tap. Plain class attribute, not a dataclass field:
+    # subclasses opt in by overriding it.
+    requires_hold_to_confirm = False
 
     # Enables returning w/buttons rendered at the same place; default behavior will
     # ensure the screen is at least scrolled to reveal the `selected_button`.
@@ -469,6 +524,125 @@ class ButtonListScreen(BaseTopNavScreen):
             ),
             fill="black"
         )
+
+
+    # -----------------------------------------------------------------------------------
+    # SeedSigner Max: touch
+    # -----------------------------------------------------------------------------------
+    def _is_button_visible(self, button: Button) -> bool:
+        if not self.has_scroll_arrows:
+            return True
+        # Same rule as `_render_visible_buttons()`
+        position_y = button.screen_y - button.scroll_y
+        return position_y >= self.top_nav.height and position_y < self.down_arrow_img_y
+
+
+    def button_index_at(self, x: int, y: int) -> int | None:
+        """ The visible button under (x, y); the gaps between buttons count as half each """
+        margin = int(GUIConstants.LIST_ITEM_PADDING / 2) + 1
+        for i, button in enumerate(self.buttons):
+            if self._is_button_visible(button) and rect_contains(component_rect(button), x, y, margin=margin):
+                return i
+        return None
+
+
+    def touch_select_button(self, index: int):
+        """ Move the selection to button `index` and draw it highlighted """
+        with self.renderer.lock:
+            if self.top_nav.is_selected:
+                self.top_nav.is_selected = False
+                self.top_nav.render_buttons()
+            if index != self.selected_button:
+                self.buttons[self.selected_button].is_selected = False
+                if self._is_button_visible(self.buttons[self.selected_button]):
+                    self.buttons[self.selected_button].render()
+                self.selected_button = index
+            self.buttons[index].is_selected = True
+            self.buttons[index].render()
+            self.renderer.show_image()
+
+
+    def touch_scroll(self, rows: int):
+        """
+        Scroll a long list by `rows` (positive: reveal the items below) without moving
+        the selection, which a touch user doesn't need.
+        """
+        if not self.has_scroll_arrows:
+            return
+        step = GUIConstants.BUTTON_HEIGHT + GUIConstants.LIST_ITEM_PADDING
+        last = self.buttons[-1]
+        overflow = last.screen_y + last.height - self.down_arrow_img_y
+        max_scroll = math.ceil(max(0, overflow) / step) * step
+        cur_scroll = self.buttons[0].scroll_y
+        # Never jump: if the list was opened scrolled further than that, it may stay there
+        upper_limit = max(max_scroll, cur_scroll)
+        new_scroll = min(max(cur_scroll + rows * step, 0), upper_limit)
+        if new_scroll == cur_scroll:
+            return
+        with self.renderer.lock:
+            for button in self.buttons:
+                button.scroll_y = new_scroll
+            self.image_draw.rectangle((0, self.top_nav.height, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+            self._render_visible_buttons()
+            self.renderer.show_image()
+
+
+    def _render_hold_progress(self, progress: float | None):
+        """
+        Draw the hold-to-confirm bar along the bottom of the selected button (`progress`
+        0.0-1.0), or restore the button when the finger is lifted early.
+        """
+        button = self.buttons[self.selected_button]
+        with self.renderer.lock:
+            button.render()
+            if progress is not None:
+                # Green, to stand out on the orange of the selected button
+                bar_height = 6
+                x1, _, x2, y2 = component_rect(button)
+                self.image_draw.rounded_rectangle(
+                    (x1, y2 - bar_height, x1 + max(int((x2 - x1) * progress), 2 * bar_height), y2),
+                    radius=3,
+                    fill=GUIConstants.SUCCESS_COLOR,
+                )
+            self.renderer.show_image()
+
+
+    def _show_hold_hint(self):
+        """ A tap where a hold is needed: say so, the way a phone would """
+        try:
+            from seedsigner.controller import Controller
+            from seedsigner.gui.toast import InfoToast
+            Controller.get_instance().activate_toast(InfoToast(_("Hold to confirm"), duration=2))
+        except Exception as e:
+            logger.info(f"Hold hint not shown: {e}")
+
+
+    def handle_touch(self, event: TouchEvent):
+        code = self.touch_top_nav(event)
+        if code is not None:
+            return code
+
+        if event.is_swipe:
+            self.touch_scroll(1 if event.direction == TouchEvent.SWIPE__UP else -1)
+            return None
+
+        index = self.button_index_at(event.x, event.y)
+        if index is None:
+            return None
+
+        if self.requires_hold_to_confirm:
+            # Only a hold confirms: a tap, however firm, does nothing here
+            if event.is_down:
+                self.touch_select_button(index)
+                if self.hw_inputs.track_touch_hold(component_rect(self.buttons[index]), progress_callback=self._render_hold_progress):
+                    return HardwareButtonsConstants.KEY_PRESS
+                self._show_hold_hint()
+            return None
+
+        if event.is_tap:
+            self.touch_select_button(index)
+            return HardwareButtonsConstants.KEY_PRESS
+        return None
 
 
     def _run(self):
@@ -654,6 +828,26 @@ class LargeButtonScreen(BaseTopNavScreen):
                 button_start_y += button_height + GUIConstants.COMPONENT_PADDING
 
         self.buttons[self.selected_button].is_selected = True
+
+
+    def handle_touch(self, event: TouchEvent):
+        """ SeedSigner Max: tap a big button to open it """
+        code = self.touch_top_nav(event)
+        if code is not None or not event.is_tap:
+            return code
+        for i, button in enumerate(self.buttons):
+            if rect_contains(component_rect(button), event.x, event.y, margin=int(GUIConstants.COMPONENT_PADDING / 2)):
+                with self.renderer.lock:
+                    self.top_nav.is_selected = False
+                    self.top_nav.render_buttons()
+                    self.buttons[self.selected_button].is_selected = False
+                    self.buttons[self.selected_button].render()
+                    self.selected_button = i
+                    button.is_selected = True
+                    button.render()
+                    self.renderer.show_image()
+                return HardwareButtonsConstants.KEY_PRESS
+        return None
 
 
     def _run(self):
@@ -886,6 +1080,18 @@ class QRDisplayScreen(BaseScreen):
             qr_brightness=self.qr_brightness,
             tips_start_time=self.tips_start_time
         ))
+
+
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: drag up/down for a brighter/darker QR code (like the joystick),
+        tap to leave.
+        """
+        if event.is_swipe:
+            return HardwareButtonsConstants.KEY_UP if event.direction == TouchEvent.SWIPE__UP else HardwareButtonsConstants.KEY_DOWN
+        if event.is_tap:
+            return HardwareButtonsConstants.KEY_PRESS
+        return None
 
 
     def _run(self):
@@ -1223,6 +1429,26 @@ class KeyboardScreen(BaseTopNavScreen):
         self.text_entry_display.render()
 
         self.renderer.show_image()
+
+
+    def handle_touch(self, event: TouchEvent):
+        """ SeedSigner Max: tap a key to type it, the check mark to save, back to leave """
+        code = self.touch_top_nav(event)
+        if code is not None or not event.is_tap:
+            return code
+
+        if self.show_save_button and rect_contains(component_rect(self.save_button), event.x, event.y, margin=GUIConstants.COMPONENT_PADDING):
+            return HardwareButtonsConstants.KEY3
+
+        key = self.keyboard.key_at(event.x, event.y)
+        if key is None or not key.is_active:
+            return None
+        with self.renderer.lock:
+            if self.top_nav.is_selected:
+                self.top_nav.is_selected = False
+                self.top_nav.render_buttons()
+            self.keyboard.select_key(key)
+        return HardwareButtonsConstants.KEY_PRESS
 
 
     def _run(self):

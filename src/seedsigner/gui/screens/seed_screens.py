@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from typing import List
 
 from seedsigner.hardware.buttons import HardwareButtons, HardwareButtonsConstants
+from seedsigner.hardware.touch import TouchEvent, rect_contains
 from seedsigner.helpers.qr import QR
 from seedsigner.gui.components import (Button, FontAwesomeIconConstants, Fonts, FormattedAddress, IconButton,
     IconTextLine, SeedSignerIconConstants, TextArea, GUIConstants, reflow_text_into_pages)
@@ -15,7 +16,7 @@ from seedsigner.gui.keyboard import Keyboard, TextEntryDisplay
 from seedsigner.gui.renderer import Renderer
 from seedsigner.models.threads import BaseThread, ThreadsafeCounter
 
-from .screen import RET_CODE__BACK_BUTTON, BaseScreen, BaseTopNavScreen, ButtonListScreen, ButtonOption, KeyboardScreen, LargeIconStatusScreen, WarningEdgesMixin
+from .screen import RET_CODE__BACK_BUTTON, BaseScreen, BaseTopNavScreen, ButtonListScreen, ButtonOption, KeyboardScreen, LargeIconStatusScreen, WarningEdgesMixin, component_rect
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,59 @@ class SeedMnemonicEntryScreen(BaseTopNavScreen):
         self.render_possible_matches()
 
         self.renderer.show_image()
+
+
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: tap a letter to type it (only letters that can still lead to a
+        BIP-39 word are active), DEL to delete. The candidate words on the right: tap
+        the highlighted word to choose it, above/below it (or drag) to scroll the list.
+        """
+        if event.is_tap and self.is_back_touch(event.x, event.y):
+            with self.renderer.lock:
+                self.is_input_in_top_nav = True
+                self.top_nav.left_button.is_selected = True
+                self.top_nav.left_button.render()
+                self.renderer.show_image()
+            return HardwareButtonsConstants.KEY_PRESS
+
+        if event.x >= self.matches_list_x:
+            if not self.possible_words:
+                return None
+            if event.is_swipe:
+                # Finger up shows the words further down the list, like KEY3
+                return HardwareButtonsConstants.KEY3 if event.direction == TouchEvent.SWIPE__UP else HardwareButtonsConstants.KEY1
+            if event.is_tap:
+                x1, y1, x2, y2 = component_rect(self.matches_list_highlight_button)
+                if event.y < y1 - GUIConstants.COMPONENT_PADDING:
+                    return HardwareButtonsConstants.KEY1
+                if event.y > y2 + GUIConstants.COMPONENT_PADDING:
+                    return HardwareButtonsConstants.KEY3
+                return HardwareButtonsConstants.KEY2
+            return None
+
+        if not event.is_tap:
+            return None
+        key = self.keyboard.key_at(event.x, event.y)
+        if key is None:
+            return None
+        if not key.is_additional_key and key.code not in self.possible_alphabet:
+            # No BIP-39 word continues with this letter
+            return None
+
+        with self.renderer.lock:
+            if self.is_input_in_top_nav:
+                self.is_input_in_top_nav = False
+                self.top_nav.left_button.is_selected = False
+                self.top_nav.left_button.render()
+            self.keyboard.select_key(key)
+            if not key.is_additional_key:
+                # Same as the joystick hovering on the letter: `_run()` locks it in on
+                # KEY_PRESS (without this, a letter left hovering by the initial state
+                # would be locked in instead of the tapped one)
+                self.letters = self.letters[:-1]
+                self.letters.append(key.code)
+        return HardwareButtonsConstants.KEY_PRESS
 
 
     def _run(self):
@@ -586,6 +640,9 @@ class SeedExportXpubCustomDerivationScreen(KeyboardScreen):
 
 @dataclass
 class SeedExportXpubDetailsScreen(WarningEdgesMixin, ButtonListScreen):
+    # SeedSigner Max: irreversible action, the finger must be held (see ButtonListScreen)
+    requires_hold_to_confirm = True
+
     # Customize defaults
     is_bottom_list: bool = True
     fingerprint: str = None
@@ -671,6 +728,21 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
 
         # Isolate the more math-oriented or just uncommon symbols
         keys_symbol_2 = """^*[]{}_\\|<>/`~"""
+
+        # SeedSigner Max: optionally shuffle every key layout, freshly each time this
+        # screen opens (see SETTING__SCRAMBLED_KEYBOARD). Lowercase and uppercase share
+        # one permutation, so switching case keeps every letter where it was.
+        from seedsigner.models.settings import Settings, SettingsConstants
+        if Settings.get_instance().get_value(SettingsConstants.SETTING__SCRAMBLED_KEYBOARD) == SettingsConstants.OPTION__ENABLED:
+            import secrets
+            rng = secrets.SystemRandom()
+            order = list(range(len(keys_lower)))
+            rng.shuffle(order)
+            keys_lower = "".join(keys_lower[i] for i in order)
+            keys_upper = "".join(keys_upper[i] for i in order)
+            keys_number = "".join(rng.sample(keys_number, len(keys_number)))
+            keys_symbol_1 = "".join(rng.sample(keys_symbol_1, len(keys_symbol_1)))
+            keys_symbol_2 = "".join(rng.sample(keys_symbol_2, len(keys_symbol_2)))
 
 
         # Set up the keyboard params
@@ -867,6 +939,33 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
         self.renderer.show_image()
 
 
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: tap a key to type it; the three buttons on the right (ABC/abc,
+        123/!@#/*[], check mark) are KEY1, KEY2 and KEY3.
+        """
+        code = self.touch_top_nav(event)
+        if code is not None or not event.is_tap:
+            return code
+
+        for button, button_code in ((self.hw_button1, HardwareButtonsConstants.KEY1),
+                                    (self.hw_button2, HardwareButtonsConstants.KEY2),
+                                    (self.hw_button3, HardwareButtonsConstants.KEY3)):
+            if rect_contains(component_rect(button), event.x, event.y, margin=GUIConstants.COMPONENT_PADDING):
+                return button_code
+
+        keyboard = getattr(self, "touch_cur_keyboard", self.keyboard_abc)
+        key = keyboard.key_at(event.x, event.y)
+        if key is None:
+            return None
+        with self.renderer.lock:
+            if self.top_nav.is_selected:
+                self.top_nav.is_selected = False
+                self.top_nav.render_buttons()
+            keyboard.select_key(key)
+        return HardwareButtonsConstants.KEY_PRESS
+
+
     def _run(self):
         cursor_position = len(self.passphrase)
         cur_keyboard = self.keyboard_abc
@@ -875,6 +974,9 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
 
         # Start the interactive update loop
         while True:
+            # SeedSigner Max: the touch handler needs the keyboard currently shown
+            self.touch_cur_keyboard = cur_keyboard
+
             input = self.hw_inputs.wait_for(HardwareButtonsConstants.ALL_KEYS)
 
             keyboard_swap = False
@@ -1324,6 +1426,24 @@ class SeedTranscribeSeedQRZoomedInScreen(BaseScreen):
         )
 
 
+    def handle_touch(self, event: TouchEvent):
+        """
+        SeedSigner Max: the screen works as a d-pad. Tap near an edge to move one zone
+        that way, tap the middle to leave.
+        """
+        if not event.is_tap:
+            return None
+        if event.x < self.canvas_width / 4:
+            return HardwareButtonsConstants.KEY_LEFT
+        if event.x > self.canvas_width * 3 / 4:
+            return HardwareButtonsConstants.KEY_RIGHT
+        if event.y < self.canvas_height / 4:
+            return HardwareButtonsConstants.KEY_UP
+        if event.y > self.canvas_height * 3 / 4:
+            return HardwareButtonsConstants.KEY_DOWN
+        return HardwareButtonsConstants.KEY_PRESS
+
+
     def _run(self):
         while True:
             input = self.hw_inputs.wait_for(HardwareButtonsConstants.KEYS__LEFT_RIGHT_UP_DOWN + HardwareButtonsConstants.KEYS__ANYCLICK)
@@ -1646,6 +1766,9 @@ class SeedSignMessageConfirmMessageScreen(ButtonListScreen):
 
 @dataclass
 class SeedSignMessageConfirmAddressScreen(ButtonListScreen):
+    # SeedSigner Max: irreversible action, the finger must be held (see ButtonListScreen)
+    requires_hold_to_confirm = True
+
     derivation_path: str = None
     address: str = None
 

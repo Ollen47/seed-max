@@ -16,6 +16,7 @@ class SettingsMenuView(View):
     ADVANCED = ButtonOption("Advanced", right_icon_name=SeedSignerIconConstants.CHEVRON_RIGHT)
     HARDWARE = ButtonOption("Hardware", right_icon_name=SeedSignerIconConstants.CHEVRON_RIGHT)
     IO_TEST = ButtonOption("I/O test")
+    TOUCH_CALIBRATION = ButtonOption("Touch calibration")   # SeedSigner Max
     DONATE = ButtonOption("Donate")
 
     def __init__(self, visibility: str = SettingsConstants.VISIBILITY__GENERAL, selected_attr: str = None, initial_scroll: int = 0):
@@ -61,6 +62,10 @@ class SettingsMenuView(View):
             title = "Hardware"
             next_destination = None
 
+            from seedsigner.hardware import hw_profile
+            if hw_profile.is_max_profile():
+                button_data.append(self.TOUCH_CALIBRATION)
+
         elif self.visibility == SettingsConstants.VISIBILITY__DEVELOPER:
             title = _("Dev Options")
             next_destination = None
@@ -93,6 +98,9 @@ class SettingsMenuView(View):
 
         elif button_data[selected_menu_num] == self.IO_TEST:
             return Destination(IOTestView)
+
+        elif button_data[selected_menu_num] == self.TOUCH_CALIBRATION:
+            return Destination(TouchCalibrationView)
 
         elif button_data[selected_menu_num] == self.DONATE:
             return Destination(DonateView)
@@ -345,6 +353,38 @@ class IOTestView(View):
         self.run_screen(settings_screens.IOTestScreen)
 
         return Destination(SettingsMenuView)
+
+
+
+class TouchCalibrationView(View):
+    """
+    SeedSigner Max: calibrate the touch screen for this session.
+
+    SeedSigner is stateless, so the result isn't saved: the screen shows the six values
+    to copy into `hw_profile.TOUCH_CALIBRATION` before building your own image. The new
+    calibration only stays active if "Keep" can be tapped with it.
+    """
+    def run(self):
+        from seedsigner.hardware.buttons import HardwareButtons
+        device = HardwareButtons.get_instance()._get_touch_device()
+        if device is None:
+            return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
+
+        result = self.run_screen(settings_screens.TouchCalibrationScreen)
+        if result is not None:
+            calibration, max_error = result
+            previous = device.calibration
+            device.calibration = calibration
+            choice = self.run_screen(
+                settings_screens.TouchCalibrationResultScreen,
+                calibration_values=calibration.as_tuple(),
+                max_error_px=max_error,
+            )
+            if choice != 0:
+                # "Discard", or nothing could be tapped before the timeout
+                device.calibration = previous
+
+        return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
 
 
 

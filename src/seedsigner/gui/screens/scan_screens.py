@@ -222,6 +222,18 @@ class ScanScreen(BaseScreen):
                     break
 
 
+    def handle_touch(self, event):
+        """
+        SeedSigner Max: "< back" is drawn at the bottom of the live preview. A tap on
+        the lower part of the screen leaves; the rest of the screen ignores touches, so
+        a thumb resting on it while aiming doesn't abort the scan.
+        """
+        from seedsigner.hardware.buttons import HardwareButtonsConstants
+        if event.is_tap and event.y > self.canvas_height * 0.6:
+            return HardwareButtonsConstants.KEY_LEFT
+        return None
+
+
     def _run(self):
         """
             _render() is mostly meant to be a one-time initial drawing call to set up the

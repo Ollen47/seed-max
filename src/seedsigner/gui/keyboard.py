@@ -490,6 +490,47 @@ class Keyboard:
         raise Exception(f"""`selected_letter` "{selected_letter}" not found in keyboard""")
 
 
+    def key_rect(self, key) -> tuple[int, int, int, int]:
+        """ SeedSigner Max: on-screen (x1, y1, x2, y2) of `key`, as drawn by `render_key()` """
+        return (
+            key.screen_x,
+            key.screen_y,
+            key.screen_x + self.key_width * key.size - 1,
+            key.screen_y + self.key_height,
+        )
+
+
+    def key_at(self, x: int, y: int):
+        """
+        SeedSigner Max: the key under a touch at (x, y), or None. The 2 px gaps between
+        keys belong half to each neighbor, so there is no dead spot between them.
+        """
+        half_gap_x = int(self.x_gap / 2) + 1
+        half_gap_y = int(self.y_gap / 2) + 1
+        for row_keys in self.keys:
+            for key in row_keys:
+                x1, y1, x2, y2 = self.key_rect(key)
+                if x1 - half_gap_x <= x <= x2 + half_gap_x and y1 - half_gap_y <= y <= y2 + half_gap_y:
+                    return key
+        return None
+
+
+    def select_key(self, key):
+        """
+        SeedSigner Max: make `key` the selected key and redraw both keys, as a joystick
+        move onto it would. `selected_key` uses the same indices as `get_key_at()` (on
+        the bottom row, the effective position that counts wide keys by their size).
+        """
+        cur_key = self.get_selected_key()
+        if cur_key is not None and cur_key is not key:
+            cur_key.is_selected = False
+            cur_key.render_key()
+        self.selected_key["x"] = key.index_x
+        self.selected_key["y"] = key.index_y
+        key.is_selected = True
+        key.render_key()
+
+
     def set_selected_key_indices(self, x, y):
         # De-select the current selected_key
         self.get_selected_key().is_selected = False
