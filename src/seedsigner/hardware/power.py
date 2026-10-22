@@ -2,7 +2,7 @@
 SeedSigner Max (v4): battery and power switch on the carrier PCB.
 
 - PIN_BATT_LOW: an LM393 comparator with a TLV431 reference pulls it LOW when the cell
-  drops below ~3.41 V (roughly the last 10% of charge). Plain digital input: the
+  drops below ~3.44 V (roughly the last 10% of charge). Plain digital input: the
   Pi has no ADC, and no fuel-gauge chip is needed (or wanted) for this.
 - PIN_CHG_PG: the BQ24072 charger's PGOOD, LOW while a USB cable is connected.
 - PIN_PWR_OFF: the CLEAR input of the MAX16054 on/off controller. HIGH switches the

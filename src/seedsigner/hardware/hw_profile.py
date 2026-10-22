@@ -89,7 +89,7 @@ TOUCH_CALIBRATION = (
 # ---------------------------------------------------------------------------------------
 # Power (carrier PCB)
 # ---------------------------------------------------------------------------------------
-# Battery-low comparator (LM393 + TLV431, ~3.41 V on the cell): LOW = battery low
+# Battery-low comparator (LM393 + TLV431, ~3.44 V on the cell): LOW = battery low
 PIN_BATT_LOW = 15                    # BCM 22, 47 kOhm pull-up to 3V3 on the carrier
 
 # MAX16054 CLEAR input: driving it HIGH switches the 5 V boost off, i.e. cuts the power. A 100 kOhm pull-down on the
