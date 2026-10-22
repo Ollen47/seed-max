@@ -701,7 +701,7 @@ def test_power_pins():
     levels = {hw_profile.PIN_BATT_LOW: 1, hw_profile.PIN_CHG_PG: 1}
     GPIO.input = lambda pin: levels.get(pin, 1)
 
-    # v5 (no carrier, PiSugar 3 Air): the power pins are never touched
+    # v5 (no carrier, Waveshare UPS HAT (C)): the power pins are never touched
     check(hw_profile.HAS_CARRIER is False and not hw_profile.has_carrier(), "v5 profile: no carrier PCB")
     GPIO.setup = MagicMock()
     GPIO.output = MagicMock()

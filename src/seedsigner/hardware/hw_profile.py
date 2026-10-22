@@ -16,8 +16,10 @@ SeedSigner Max v5 hardware (no custom PCB, no soldering):
 - Raspberry Pi Zero v1.3 with a solderless (hammer) header
 - Waveshare 3.5inch RPi LCD (A): 480x320 ILI9486 behind an SPI-to-16-bit-parallel
   converter, XPT2046 resistive touch. It plugs straight onto header pins 1-26.
-- PiSugar 3 Air under the Pi (pogo pins: no GPIO used) with a thin LiPo cell beside it.
-  Its button switches the device on and off; SeedSigner does not talk to it.
+- Waveshare UPS HAT (C) under the Pi (pogo pins), LiPo cell on its PH2.0 socket beside
+  the Pi. Fixed-function chips only (ETA6003 charger, TPS61088 boost, INA219 monitor):
+  no microcontroller, no firmware. Its ON/OFF switch really cuts the power; SeedSigner
+  does not talk to it.
 No joystick, no KEY1-3: the touch screen is the only input.
 
 The v4 hardware (LCDwiki MSP4021 4.0" ST7796S on the carrier PCB) is still supported:
@@ -128,8 +130,9 @@ TOUCH_CALIBRATE_AT_BOOT = True
 # ---------------------------------------------------------------------------------------
 # Power
 # ---------------------------------------------------------------------------------------
-# v5 has no carrier PCB: the PiSugar 3 Air handles charging and the on/off button by
-# itself and SeedSigner reads nothing from it (no I2C driver, no extra code path).
+# v5 has no carrier PCB: the Waveshare UPS HAT (C) handles charging and the on/off
+# switch by itself and SeedSigner reads nothing from it (its INA219 sits on I2C, which
+# SeedSigner never uses: no I2C driver, no extra code path).
 # True only for the v4 carrier PCB, whose pins follow.
 HAS_CARRIER = False
 
