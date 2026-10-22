@@ -369,9 +369,15 @@ class SettingsConstants:
         (DISPLAY_CONFIGURATION__ST7789__240x240, "st7789 240x240"),
         (DISPLAY_CONFIGURATION__ST7789__320x240, "st7789 320x240"),
         (DISPLAY_CONFIGURATION__ILI9341__320x240, "ili9341 320x240 (beta)"),
-        (DISPLAY_CONFIGURATION__ST7796__480x320, "st7796 480x320"),
-        (DISPLAY_CONFIGURATION__ILI9486__480x320, "ili9486 480x320"),
     ]
+    if hw_profile.is_max_profile():
+        # SeedSigner Max: only the panel this image was built for. The other drivers use
+        # pins 18 and 22, which are the D/C and reset lines of the v5 panel: picking one
+        # would leave a black screen (for good, with Persistent Settings on).
+        if hw_profile.DISPLAY_CONFIGURATION == DISPLAY_CONFIGURATION__ST7796__480x320:
+            ALL_DISPLAY_CONFIGURATIONS = [(DISPLAY_CONFIGURATION__ST7796__480x320, "st7796 480x320")]
+        else:
+            ALL_DISPLAY_CONFIGURATIONS = [(DISPLAY_CONFIGURATION__ILI9486__480x320, "ili9486 480x320")]
 
 
     # Hidden settings

@@ -9,8 +9,12 @@ consequences, both handled here as in the Linux driver for the same board
 - every command and every parameter is a 16-bit word: (0x00, byte), D/C low for the
   command and high for its parameters;
 - pixel data is RGB565, which is 16 bits per pixel anyway: big-endian words.
-Every transfer is an even number of bytes, so the converter never gets out of step
-(spidev splits long transfers into 4096-byte chunks, also even).
+Every transfer is an even number of bytes, so the converter never gets out of step.
+A full frame (307200 bytes) is split by `writebytes2()` into chunks of spidev's bufsiz
+(131072 bytes on SeedSigner OS: `spidev.bufsiz` in cmdline.txt), even as well; CS goes
+high between chunks, which only ends a 16-bit word boundary, and RAMWR keeps going until
+the next command. luma.lcd drives the Waveshare 3.5" (B) the same way, in 4096-byte
+chunks.
 
 The init sequence (power, VCOM, gamma) and the landscape MADCTL are the Linux driver's.
 There is no backlight pin on this board: the backlight is always on.
@@ -45,6 +49,8 @@ PGAMCTRL = 0xE0       # positive gamma
 NGAMCTRL = 0xE1       # negative gamma
 DGAMCTRL = 0xE2       # digital gamma
 
+CMD_MAX_SPEED_HZ = 10_000_000
+
 
 def words(values) -> list[int]:
     """ Each byte as a big-endian 16-bit word: (0x00, byte) """
@@ -73,15 +79,20 @@ class ILI9486(BaseDisplayDriver):
         self._spi.max_speed_hz = hw_profile.ILI9486_SPI_SPEED_HZ
         self._spi.mode = 0
 
+        # Commands and parameters at most at 10 MHz, pixel data at the full clock, as the
+        # Linux driver does (mipi_dbi_spi_cmd_max_speed): raising ILI9486_SPI_SPEED_HZ
+        # can then only affect the pixels, never the init sequence or the window.
+        self._cmd_speed_hz = min(CMD_MAX_SPEED_HZ, hw_profile.ILI9486_SPI_SPEED_HZ)
+
         self.init()
 
 
     def command(self, cmd: int, data: list[int] = None):
         GPIO.output(self._dc, GPIO.LOW)
-        self._spi.writebytes(words([cmd]))
+        self._spi.xfer2(words([cmd]), self._cmd_speed_hz)
         if data:
             GPIO.output(self._dc, GPIO.HIGH)
-            self._spi.writebytes2(words(data))
+            self._spi.xfer2(words(data), self._cmd_speed_hz)
 
 
     def reset(self):

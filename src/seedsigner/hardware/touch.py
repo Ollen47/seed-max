@@ -1,5 +1,5 @@
 """
-Pure-logic layer for the "SeedSigner Max" touch screen (v4).
+Pure-logic layer for the "SeedSigner Max" touch screen (v4, v5).
 
 No hardware access here: this module turns a stream of calibrated touch samples into
 `TouchEvent`s, converts raw ADC readings to screen coordinates and solves the
@@ -68,7 +68,7 @@ def rect_contains(rect: tuple[int, int, int, int], x: int, y: int, margin: int =
 class TouchTracker:
     CONTACT_SAMPLES = 2       # ~20 ms of stable contact before a press counts
     RELEASE_SAMPLES = 3       # ~30 ms without contact before a release counts
-    TAP_SLOP_PX = 20          # ~3.5 mm on the 4.0" panel
+    TAP_SLOP_PX = 20          # ~3 mm on the 3.5" panel, ~3.5 mm on the 4.0"
     SWIPE_STEP_PX = 44        # one list row (40 px button + 4 px gap)
 
     def __init__(self):

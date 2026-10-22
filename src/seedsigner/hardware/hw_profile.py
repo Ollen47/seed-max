@@ -58,9 +58,11 @@ ILI9486_PIN_RST = 22  # BCM 25
 # because of how the panel sits in your enclosure, then recalibrate the touch screen.
 ILI9486_MADCTL = 0xE8
 
-# SPI clock. The converter limits it: 16 MHz is the usual safe value for this board.
-# Try 24_000_000 or 32_000_000 for faster screen updates; go back down if the image
-# shows noise, wrong colors or shifted lines.
+# SPI clock. The converter, not the ILI9486, sets the limit: 16 MHz is a conservative
+# starting point, to be confirmed on the real board. Try 24_000_000 or 32_000_000 for
+# faster screen updates; go back down if the image shows noise, wrong colors or shifted
+# lines. (The Pi Zero divides its core clock by an even number: the real clock is the
+# nearest value at or below the one asked for.)
 ILI9486_SPI_SPEED_HZ = 16_000_000
 
 

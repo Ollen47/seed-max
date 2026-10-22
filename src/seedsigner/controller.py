@@ -293,18 +293,27 @@ class Controller(Singleton):
                 next_destination = initial_destination
             else:
                 next_destination = Destination(MainMenuView)
-
-                # SeedSigner Max: calibrate the touch screen before the first menu, while
-                # the image doesn't carry this panel's calibration yet (see hw_profile.py)
-                from seedsigner.hardware import hw_profile
-                if hw_profile.is_max_profile() and hw_profile.TOUCH_CALIBRATE_AT_BOOT:
-                    from seedsigner.views.settings_views import TouchCalibrationView
-                    next_destination = Destination(TouchCalibrationView, view_args={"at_boot": True})
             
+            # SeedSigner Max: calibrate the touch screen before anything else can ask for a
+            # tap, while the image doesn't carry this panel's calibration yet (see
+            # hw_profile.py). The "remove the microSD" warning, if set to stay on screen,
+            # comes right after the calibration; its 5-second toast is skipped, so that it
+            # can't cover the calibration crosses.
+            from seedsigner.hardware import hw_profile
+            boot_calibration = not initial_destination and hw_profile.is_max_profile() and hw_profile.TOUCH_CALIBRATE_AT_BOOT
+            microsd_toast_timer = self.settings.get_value(SettingsConstants.SETTING__MICROSD_TOAST_TIMER)
+
+            if boot_calibration:
+                from seedsigner.views.settings_views import TouchCalibrationView
+                next_destination = Destination(TouchCalibrationView, view_args={
+                    "at_boot": True,
+                    "then_microsd_warning": microsd_toast_timer == SettingsConstants.MICROSD_TOAST_TIMER_FOREVER,
+                })
+
             # Set up our one-time toast notification tip to remove the SD card
-            if self.settings.get_value(SettingsConstants.SETTING__MICROSD_TOAST_TIMER) == SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS:
+            elif microsd_toast_timer == SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS:
                 self.activate_toast(RemoveSDCardToastManagerThread())
-            elif self.settings.get_value(SettingsConstants.SETTING__MICROSD_TOAST_TIMER) == SettingsConstants.MICROSD_TOAST_TIMER_FOREVER:
+            elif microsd_toast_timer == SettingsConstants.MICROSD_TOAST_TIMER_FOREVER:
                 next_destination = Destination(RemoveMicroSDWarningView)
 
             while True:

@@ -1,5 +1,5 @@
 """
-XPT2046 resistive touch controller driver for the "SeedSigner Max" (v4).
+XPT2046 resistive touch controller driver for the "SeedSigner Max" (v4, v5).
 
 The XPT2046 is a fixed-function 12-bit ADC with a touch-panel front end: it has no
 firmware and no memory of its own, it only measures the resistive panel when the Pi

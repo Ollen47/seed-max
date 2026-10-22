@@ -187,36 +187,90 @@ def test_ili9486_driver():
     check(SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__DISPLAY_CONFIGURATION).default_value == "ili9486_480x320",
           "v5 profile boots on the ILI9486 480x320 panel")
 
+    # Record the exact bus traffic: D/C level changes and every SPI transfer, in order
+    log = []
     spi = MagicMock()
+    spi.xfer2 = MagicMock(side_effect=lambda data, speed_hz=0, *a: log.append(("xfer", list(data), speed_hz)) or [0] * len(data))
+    spi.writebytes2 = MagicMock(side_effect=lambda data: log.append(("pixels", bytes(data), None)))
+    spi.writebytes = MagicMock(side_effect=lambda data: log.append(("writebytes", list(data), None)))
     spidev.SpiDev = MagicMock(return_value=spi)
     GPIO.setup = MagicMock()
+    GPIO.LOW, GPIO.HIGH = 0, 1
+    GPIO.output = lambda pin, value: log.append(("pin", pin, value))
     disp = DisplayDriverFactory.instantiate_display_driver(DISPLAY_TYPE__ILI9486, width=480, height=320)
     check(spidev.SpiDev.call_args.args == (0, 0), "ILI9486 on SPI0 CE0")
-    check(spi.max_speed_hz == 16_000_000, "ILI9486 SPI clock 16 MHz (converter-limited default)")
+    check(spi.max_speed_hz == 16_000_000, "ILI9486 SPI clock 16 MHz (conservative default)")
     check((disp.width, disp.height) == (480, 320), "ILI9486 exposes a 480x320 landscape surface")
     pins = sorted(c.args[0] for c in GPIO.setup.call_args_list)
     check(pins == [18, 22], f"only RS (pin 18) and RST (pin 22) are driven, no backlight pin: {pins}")
 
-    transfers = [list(c.args[0]) for c in spi.writebytes.call_args_list + spi.writebytes2.call_args_list]
-    check(all(len(t) % 2 == 0 for t in transfers), "every transfer is whole 16-bit words")
-    check(all(t[0::2] == [0] * (len(t) // 2) for t in transfers), "commands and parameters are sent as (0x00, byte) words")
-    commands = [c.args[0][1] for c in spi.writebytes.call_args_list]
-    check(commands[:2] == [0xB0, 0x11] and commands[-1] == 0x29, f"init: interface mode, sleep out ... display on: {[hex(c) for c in commands]}")
-    params = [list(c.args[0]) for c in spi.writebytes2.call_args_list]
+    def bus(entries):
+        """ (D/C level, transfer) pairs, in order """
+        dc, out = None, []
+        for kind, data, extra in entries:
+            if kind == "pin" and data == hw_profile.ILI9486_PIN_DC:
+                dc = extra
+            elif kind != "pin":
+                out.append((dc, kind, data, extra))
+        return out
+
+    traffic = bus(log)
+    xfers = [t for t in traffic if t[1] == "xfer"]
+    check(not [t for t in traffic if t[1] == "writebytes"], "no unframed writebytes() at all")
+    check(all(len(t[2]) % 2 == 0 and t[2][0::2] == [0] * (len(t[2]) // 2) for t in xfers),
+          "every command and parameter transfer is whole (0x00, byte) words")
+    check(all(t[3] == 10_000_000 for t in xfers), "commands and parameters at 10 MHz (Linux mipi_dbi cap)")
+    commands = [t[2][1] for t in xfers if t[0] == 0]
+    check(all(len(t[2]) == 2 for t in xfers if t[0] == 0), "D/C low: exactly one 16-bit command word per transfer")
+    expected = [0xB0, 0x11, 0x3A, 0xC2, 0xC5, 0xE0, 0xE1, 0xE2, 0x36, 0x20, 0x29]
+    check(commands == expected, f"init sequence in the Linux driver's order: {[hex(c) for c in commands]}")
+    params = [t[2] for t in xfers if t[0] == 1]
     check([0, 0x55] in params, "16 bits per pixel")
     check([0, 0xE8] in params, "MADCTL 0xE8: landscape as the Linux driver's rotation 0")
+    check([0, 0x00] * 4 in params, "VCOM control: four zero parameters")
 
-    spi.reset_mock()
+    log.clear()
     disp.show_image(Image.new("RGB", (480, 320), (255, 0, 0)))
-    params = [list(c.args[0]) for c in spi.writebytes2.call_args_list]
-    check([0, 0, 0, 0, 0, 0x01, 0, 0xDF] in params and [0, 0, 0, 0, 0, 0x01, 0, 0x3F] in params,
-          "window 0..479 x 0..319, as 16-bit words")
-    frame = spi.writebytes2.call_args_list[-1].args[0]
-    check(len(frame) == 480 * 320 * 2 and frame[:2] == bytes([0xF8, 0x00]), "full frame of 307200 bytes, big-endian RGB565")
+    traffic = bus(log)
+    check([(t[0], t[2]) for t in traffic[:6]] == [
+        (0, [0, 0x2A]), (1, [0, 0, 0, 0, 0, 0x01, 0, 0xDF]),
+        (0, [0, 0x2B]), (1, [0, 0, 0, 0, 0, 0x01, 0, 0x3F]),
+        (0, [0, 0x2C]), (1, traffic[5][2])], "window 0..479 x 0..319, then RAMWR, D/C right for each")
+    frame = traffic[-1]
+    check(frame[1] == "pixels" and frame[0] == 1 and len(frame[2]) == 480 * 320 * 2 and frame[2][:2] == bytes([0xF8, 0x00]),
+          "pixels with D/C high: full frame of 307200 bytes, big-endian RGB565, at the full clock")
+    check(all(chunk % 2 == 0 for chunk in (131072, 131072, 307200 - 2 * 131072)), "spidev.bufsiz chunks stay 16-bit aligned")
 
-    spi.reset_mock()
+    log.clear()
     disp.invert(enabled=True)
-    check([list(c.args[0]) for c in spi.writebytes.call_args_list] == [[0, 0x21]], "'Invert colors' = INVON")
+    check([(t[0], t[2]) for t in bus(log)] == [(0, [0, 0x21])], "'Invert colors' = INVON")
+
+
+def test_display_choice_locked():
+    """ v5: the display type can't be switched to a driver that drives pins 18/22 differently """
+    from seedsigner.models.settings_definition import SettingsDefinition
+    from seedsigner.models.settings import Settings
+    entry = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__DISPLAY_CONFIGURATION)
+    check([v for v, _ in entry.selection_options] == ["ili9486_480x320"], f"only the v5 panel is offered: {entry.selection_options}")
+
+    import seedsigner.gui.renderer as renderer_module
+    created = []
+    factory = renderer_module.DisplayDriverFactory
+    renderer_module.DisplayDriverFactory = SimpleNamespace(
+        instantiate_display_driver=lambda display_type, width, height: created.append((display_type, width, height)) or SimpleNamespace(width=width, height=height, invert=lambda **k: None, cleanup=lambda: None))
+    settings = Settings.get_instance()
+    previous = settings.get_value(SettingsConstants.SETTING__DISPLAY_CONFIGURATION)
+    try:
+        # As if Persistent Settings or a SettingsQR carried another panel
+        settings._data[SettingsConstants.SETTING__DISPLAY_CONFIGURATION] = "st7789_240x240"
+        renderer = Renderer.__new__(Renderer)
+        renderer.disp = None
+        Renderer.initialize_display(renderer)
+        check(created == [("ili9486", 480, 320)] and (renderer.canvas_width, renderer.canvas_height) == (480, 320),
+              f"a stored st7789 setting is ignored: the v5 panel is used ({created})")
+    finally:
+        settings._data[SettingsConstants.SETTING__DISPLAY_CONFIGURATION] = previous
+        renderer_module.DisplayDriverFactory = factory
 
 
 def test_boot_calibration_view():
@@ -761,6 +815,7 @@ if __name__ == "__main__":
     TestRenderer.configure_instance()
     test_st7796_driver()
     test_ili9486_driver()
+    test_display_choice_locked()
     test_xpt2046_driver()
     test_boot_calibration_view()
     test_menu_tap()

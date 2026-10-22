@@ -6,7 +6,7 @@ from seedsigner.gui.screens import (RET_CODE__BACK_BUTTON, ButtonListScreen, set
 from seedsigner.gui.screens.screen import ButtonOption
 from seedsigner.models.settings import Settings, SettingsConstants, SettingsDefinition
 
-from .view import View, Destination, MainMenuView
+from .view import View, Destination, MainMenuView, RemoveMicroSDWarningView
 
 logger = logging.getLogger(__name__)
 
@@ -364,24 +364,55 @@ class TouchCalibrationView(View):
     to copy into `hw_profile.TOUCH_CALIBRATION` before building your own image. The new
     calibration only stays active if "Keep" can be tapped with it.
 
-    `at_boot`: started by the Controller before the main menu (see
-    hw_profile.TOUCH_CALIBRATE_AT_BOOT); returns to the main menu instead of Settings.
+    `at_boot`: started by the Controller before the first screen (see
+    hw_profile.TOUCH_CALIBRATE_AT_BOOT). With the generic calibration the menus may be
+    impossible to hit, so it repeats until "Keep" is chosen, then goes to the main menu
+    (or first to the "remove the microSD" warning, if `then_microsd_warning`).
     """
-    def __init__(self, at_boot: bool = False):
+    def __init__(self, at_boot: bool = False, then_microsd_warning: bool = False):
         super().__init__()
         self.at_boot = at_boot
+        self.then_microsd_warning = then_microsd_warning
+
+
+    def _calibrate(self, device) -> bool:
+        """ One calibration round; True if the new calibration was kept """
+        result = self.run_screen(settings_screens.TouchCalibrationScreen)
+        if result is None:
+            # Nobody touched the crosses before the timeout
+            return False
+        calibration, max_error = result
+        previous = device.calibration
+        device.calibration = calibration
+        choice = self.run_screen(
+            settings_screens.TouchCalibrationResultScreen,
+            calibration_values=calibration.as_tuple(),
+            max_error_px=max_error,
+        )
+        if choice != 0:
+            # "Discard", or nothing could be tapped before the timeout
+            device.calibration = previous
+            return False
+        return True
 
 
     def run(self):
         from seedsigner.hardware.buttons import HardwareButtons
-        if self.at_boot:
-            done = Destination(MainMenuView)
-        else:
+        if not self.at_boot:
             done = Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
+        elif self.then_microsd_warning:
+            done = Destination(RemoveMicroSDWarningView)
+        else:
+            done = Destination(MainMenuView)
 
         device = HardwareButtons.get_instance()._get_touch_device()
         if device is None:
             return done
+
+        while not self._calibrate(device) and self.at_boot:
+            pass
+
+        return done
 
         result = self.run_screen(settings_screens.TouchCalibrationScreen)
         if result is not None:

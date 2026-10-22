@@ -38,6 +38,12 @@ class Renderer(ConfigurableSingleton):
         self.lock.acquire()
 
         display_config = Settings.get_instance().get_value(SettingsConstants.SETTING__DISPLAY_CONFIGURATION, default_if_none=True)
+
+        # SeedSigner Max: the panel is fixed by the image (see hw_profile.py). A different
+        # value can still arrive from Persistent Settings or a SettingsQR; ignore it.
+        from seedsigner.hardware import hw_profile
+        if hw_profile.is_max_profile() and display_config != hw_profile.DISPLAY_CONFIGURATION:
+            display_config = hw_profile.DISPLAY_CONFIGURATION
         self.display_type = display_config.split("_")[0]
         if self.display_type not in ALL_DISPLAY_TYPES:
             raise Exception(f"Invalid display type: {self.display_type}")
