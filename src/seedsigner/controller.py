@@ -184,6 +184,10 @@ class Controller(Singleton):
         controller.microsd = MicroSD.get_instance()
         controller.microsd.start_detection()
 
+        # SeedSigner Max: "Battery low" warnings from the carrier's comparator
+        from seedsigner.hardware.power import BatteryMonitor
+        BatteryMonitor.get_instance().start_monitoring()
+
         # Store one working psbt in memory
         controller.psbt = None
         controller.psbt_parser = None

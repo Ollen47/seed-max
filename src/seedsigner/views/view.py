@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import dataclass
 from gettext import gettext as _
 from typing import Type
@@ -283,8 +284,25 @@ class RestartView(View):
 class PowerOffView(View):
     def run(self):
         from seedsigner.gui.screens.screen import PowerOffNotRequiredScreen
+        from seedsigner.hardware import hw_profile
+
+        if hw_profile.is_max_profile() and not self.renderer.is_screenshot_generator:
+            # SeedSigner Max: really switch off (Pololu #2808), which also wipes the RAM
+            from seedsigner.gui.screens.screen import PowerOffScreen
+            PowerOffView.PowerOffThread().start()
+            self.run_screen(PowerOffScreen)
+
+        # Still running: the power switch isn't there (bench setup) or didn't respond
         self.run_screen(PowerOffNotRequiredScreen)
         return Destination(BackStackView)
+
+
+    class PowerOffThread(BaseThread):
+        def run(self):
+            from seedsigner.hardware.power import power_off
+            # Give the screen time to appear first
+            time.sleep(0.5)
+            power_off()
 
 
 

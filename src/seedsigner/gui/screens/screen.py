@@ -1303,6 +1303,29 @@ class ResetScreen(BaseTopNavScreen):
 
 
 @dataclass
+class PowerOffScreen(BaseTopNavScreen):
+    """
+    SeedSigner Max: shown while the Pololu switch cuts the power. Returns after a few
+    seconds only if the power is still on (a bench setup without the switch).
+    """
+    def __post_init__(self):
+        self.title = _("Powering Off")
+        self.show_back_button = False
+        super().__post_init__()
+
+        self.components.append(TextArea(
+            text=_("All in-memory data will be wiped."),
+            screen_y=self.top_nav.height,
+            height=self.canvas_height - self.top_nav.height,
+        ))
+
+
+    def _run(self):
+        time.sleep(3)
+
+
+
+@dataclass
 class PowerOffNotRequiredScreen(BaseTopNavScreen):
     def __post_init__(self):
         self.title = _("Just Unplug It")
