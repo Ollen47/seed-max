@@ -10,9 +10,10 @@ import sys
 
 import pytest
 
-from seedsigner.hardware.touch import TouchCalibration, TouchEvent, TouchTracker, rect_contains
-from seedsigner.hardware.xpt2046 import (READ_SEQUENCE, best_two_average, decode_results,
-    parse_response)
+from seedsigner.hardware.touch import (PRESS_DROP_FIRST, PressStats, TouchCalibration, TouchEvent,
+    TouchTracker, press_stats, rect_contains)
+from seedsigner.hardware.xpt2046 import (CMD_X, CMD_Y, CMD_Y_POWER_DOWN, CMD_Z1, CMD_Z2, READ_RESULTS,
+    READ_SEQUENCE, decode_results, median3, parse_response)
 
 
 class Finger:
@@ -175,7 +176,7 @@ def test_default_calibration_maps_the_raw_range_onto_the_screen():
 # XPT2046 response parsing
 # ---------------------------------------------------------------------------------------
 def encode_response(values):
-    """ Build a 19-byte SPI response carrying these nine 12-bit results """
+    """ Build a 21-byte SPI response carrying these ten 12-bit results """
     response = [0] * len(READ_SEQUENCE)
     for k, value in enumerate(values):
         word = (value & 0x0FFF) << 3
@@ -185,28 +186,96 @@ def encode_response(values):
 
 
 def test_read_sequence_shape():
-    assert len(READ_SEQUENCE) == 19
+    """ Z1, Z2, then X four times and Y four times in a row, ending with the power down """
+    assert len(READ_SEQUENCE) == 21
+    commands = [READ_SEQUENCE[0]] + READ_SEQUENCE[1:19:2]
+    assert commands == [CMD_Z1, CMD_Z2, CMD_X, CMD_X, CMD_X, CMD_X, CMD_Y, CMD_Y, CMD_Y, CMD_Y_POWER_DOWN]
+    assert len(commands) == READ_RESULTS
+    assert READ_SEQUENCE[2:21:2] == [0x00] * 10      # the other bytes only clock data out
     assert READ_SEQUENCE[-4] == 0xD0                  # last command powers down, arms PENIRQ
 
 
+def test_decode_known_bytes():
+    """
+    Hand-built response: the k-th result sits in bytes 2k+1 (high) and 2k+2 (low) as
+    busy bit + 12 data bits + 3 zero bits, i.e. value << 3.
+    """
+    # 0xABC << 3 = 0x55E0; 0x123 << 3 = 0x0918; 0xFFF << 3 = 0x7FF8; 0x001 << 3 = 0x0008
+    response = [0x00,            # byte 0: nothing comes back while Z1 is sent
+                0x55, 0xE0,      # Z1 = 0xABC
+                0x09, 0x18,      # Z2 = 0x123
+                0x7F, 0xF8,      # X0 = 0xFFF (settling read)
+                0x00, 0x08,      # X1 = 1
+                0x00, 0x10,      # X2 = 2
+                0x00, 0x18,      # X3 = 3
+                0x7F, 0xF8,      # Y0 = 0xFFF (settling read)
+                0x00, 0x20,      # Y1 = 4
+                0x00, 0x28,      # Y2 = 5
+                0x00, 0x30]      # Y3 = 6
+    assert decode_results(response) == [0xABC, 0x123, 0xFFF, 1, 2, 3, 0xFFF, 4, 5, 6]
+    # The busy bit (MSB of the high byte) and the three trailing bits are masked off
+    noisy = list(response)
+    noisy[1] |= 0x80
+    noisy[2] |= 0x07
+    assert decode_results(noisy)[0] == 0xABC
+    # pressure = 0xABC + 4095 - 0x123 = 2748 + 4095 - 291 = 6552
+    assert parse_response(response, 400) == (2, 5, 6552)
+
+
 def test_decode_results_roundtrip():
-    values = [10, 4000, 1, 2048, 1024, 4095, 0, 7, 3333]
+    values = [10, 4000, 1, 2048, 1024, 4095, 0, 7, 3333, 12]
     assert decode_results(encode_response(values)) == values
 
 
-def test_best_two_average_drops_the_outlier():
-    assert best_two_average(1000, 1004, 3000) == 1002
-    assert best_two_average(3000, 1000, 1004) == 1002
-    assert best_two_average(1000, 3000, 1004) == 1002
+def test_median3_drops_the_outlier():
+    assert median3(1000, 1004, 3000) == 1004
+    assert median3(3000, 1000, 1004) == 1004
+    assert median3(1000, 3000, 1004) == 1004
+    assert median3(5, 5, 4000) == 5
+
+
+def test_parse_response_discards_settling_reads():
+    # Settling reads far off (an axis still switching): ignored. One outlier per axis too.
+    response = encode_response([800, 3500, 100, 1000, 1004, 3900, 4000, 2000, 2002, 10])
+    assert parse_response(response, 400) == (1004, 2000, 1395)
 
 
 def test_parse_response_pressure_threshold():
     # Firm press: z = z1 + 4095 - z2 = 800 + 4095 - 3500 = 1395
-    firm = encode_response([800, 3500, 0, 1000, 2000, 1002, 2004, 1500, 2002])
-    assert parse_response(firm, 400) == (1001, 2001, 1395)   # ties pick either close pair
+    firm = encode_response([800, 3500, 0, 1000, 1002, 1500, 0, 2000, 2004, 2002])
+    assert parse_response(firm, 400) == (1002, 2002, 1395)
     # Light contact: z = 100 + 4095 - 3900 = 295
-    light = encode_response([100, 3900, 0, 1000, 2000, 1000, 2000, 1000, 2000])
+    light = encode_response([100, 3900, 0, 1000, 1000, 1000, 0, 2000, 2000, 2000])
     assert parse_response(light, 400) is None
+
+
+
+# ---------------------------------------------------------------------------------------
+# Press statistics (touch test log, calibration points)
+# ---------------------------------------------------------------------------------------
+def test_press_stats_drops_landing_noise():
+    landing = [(4000, 10, 300), (3000, 900, 500), (2500, 1500, 700)]
+    steady = [(1000, 2000, 1200), (1010, 1990, 1250), (990, 2004, 1180), (1004, 1996, 1300)]
+    stats = press_stats(landing + steady)
+    assert PRESS_DROP_FIRST == 3
+    assert stats == PressStats(x=1004, y=2000, x_half_range=10, y_half_range=7, pressure=1250, samples=4)
+
+
+def test_press_stats_edge_cases():
+    assert press_stats([(1, 2, 3)] * 3) is None                     # nothing left after the drop
+    one = press_stats([(0, 0, 0)] * 3 + [(100, 200, 900)])
+    assert one == PressStats(100, 200, 0, 0, 900, 1)
+    # Odd spread rounds up: any movement shows as at least 1
+    assert press_stats([(10, 10, 500), (11, 10, 500)], drop_first=0).x_half_range == 1
+    # Floats (e.g. the calibration harness) are rounded to whole ADC units
+    assert press_stats([(10.4, 20.6, 500.0)], drop_first=0) == PressStats(10, 21, 0, 0, 500, 1)
+
+
+def test_press_stats_log_line():
+    stats = PressStats(x=3712, y=402, x_half_range=12, y_half_range=8, pressure=1234, samples=47)
+    assert stats.log_line(1) == "1  x=3712(\u00b112)  y=402(\u00b18)  z=1234  k=47"
+    worst = PressStats(x=4095, y=4095, x_half_range=999, y_half_range=999, pressure=8190, samples=47)
+    assert len(worst.log_line(5)) <= 44              # 8 px per character: <= 352 px
 
 
 

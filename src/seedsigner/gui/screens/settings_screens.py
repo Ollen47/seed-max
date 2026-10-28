@@ -381,6 +381,50 @@ class SettingsQRConfirmationScreen(ButtonListScreen):
 
 
 
+def wait_touch_release(device, deadline: float, clear_samples: int = 10) -> bool:
+    """
+    SeedSigner Max: wait until the panel has read empty `clear_samples` times in a row
+    (~10 ms apart: ~100 ms without contact). False if `deadline` passes first.
+    """
+    clear = 0
+    while time.time() < deadline:
+        clear = clear + 1 if device.read_raw() is None else 0
+        if clear >= clear_samples:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def read_raw_press(device, deadline: float, min_samples: int, max_samples: int, drop_first: int = None):
+    """
+    SeedSigner Max: the raw (x, y, pressure) readings of one deliberate press, ~10 ms
+    apart, or None if `deadline` passes first. A press counts once it has `min_samples`
+    consecutive readings beyond the first `drop_first` (landing noise, dropped later by
+    `press_stats()`); a shorter contact is a bounce and is forgotten. Reading stops at
+    the release, or once `max_samples` readings were collected (finger still down).
+    """
+    from seedsigner.hardware.touch import PRESS_DROP_FIRST
+    if drop_first is None:
+        drop_first = PRESS_DROP_FIRST
+    needed = min_samples + drop_first
+    samples = []
+    while time.time() < deadline:
+        raw = device.read_raw()
+        if raw is None:
+            if len(samples) >= needed:
+                break
+            samples = []        # too short: a bounce, not a press
+        else:
+            samples.append(tuple(raw[:3]))
+            if len(samples) >= max(max_samples, needed):
+                break
+        time.sleep(0.01)
+    if len(samples) < needed:
+        return None
+    return samples
+
+
+
 @dataclass
 class TouchCalibrationScreen(BaseScreen):
     """
@@ -393,8 +437,8 @@ class TouchCalibrationScreen(BaseScreen):
     stops touching the screen for TIMEOUT_S (e.g. opened it by mistake).
     """
     TARGET_INSET = 40              # px from the screen edges
-    MIN_SAMPLES = 8                # stable readings before a press counts (~80 ms)
-    MAX_SAMPLES = 25
+    MIN_SAMPLES = 8                # stable readings kept (after the first 3) before a press counts
+    MAX_SAMPLES = 25               # readings collected per press, the dropped ones included
     TIMEOUT_S = 30
 
     def __post_init__(self):
@@ -432,34 +476,21 @@ class TouchCalibrationScreen(BaseScreen):
 
     def _wait_release(self, device, deadline: float) -> bool:
         """ Wait for ~100 ms without contact """
-        clear = 0
-        while time.time() < deadline:
-            clear = clear + 1 if device.read_raw() is None else 0
-            if clear >= 10:
-                return True
-            time.sleep(0.01)
-        return False
+        return wait_touch_release(device, deadline)
 
 
     def _read_press(self, device, deadline: float):
-        """ Median raw (x, y) of one deliberate press, or None on timeout """
-        samples = []
-        while time.time() < deadline:
-            raw = device.read_raw()
-            if raw is None:
-                if len(samples) >= self.MIN_SAMPLES:
-                    break
-                samples = []        # too short: a bounce, not a press
-            else:
-                samples.append(raw[:2])
-                if len(samples) >= self.MAX_SAMPLES:
-                    break
-            time.sleep(0.01)
-        if len(samples) < self.MIN_SAMPLES:
+        """
+        Median raw (x, y) of one deliberate press, or None on timeout. The first
+        PRESS_DROP_FIRST readings of the press (landing noise) are dropped; MIN_SAMPLES
+        counts the readings kept after that.
+        """
+        from seedsigner.hardware.touch import press_stats
+        samples = read_raw_press(device, deadline, self.MIN_SAMPLES, self.MAX_SAMPLES)
+        if samples is None:
             return None
-        xs = sorted(s[0] for s in samples)
-        ys = sorted(s[1] for s in samples)
-        return (xs[len(xs) // 2], ys[len(ys) // 2])
+        stats = press_stats(samples)
+        return (stats.x, stats.y)
 
 
     def _run(self):
@@ -547,3 +578,182 @@ class TouchCalibrationResultScreen(ButtonListScreen):
         if time.time() >= self.deadline:
             return "timeout"
         return None
+
+
+
+@dataclass
+class TouchRawTestScreen(BaseScreen):
+    """
+    SeedSigner Max: diagnostic touch test (hw_profile.TOUCH_RAW_TEST_AT_BOOT).
+
+    Five numbered targets (four corners and the center). For each deliberate press the
+    raw XPT2046 readings are summarized in one log line: median position with half the
+    range of each axis, median pressure, number of readings. After the fifth press, the
+    least-squares fit of the five raw points to the five targets and its worst error.
+    Uses raw readings only, so it works with any calibration, even a wildly wrong one.
+
+    A strip of color bars (red, green, blue, white, the UI orange, black) under the
+    title checks the display's colors at the same time.
+
+    Ends on a press after the fifth one, or when nobody touches the screen for
+    TIMEOUT_S at any stage. Returns the list of PressStats (possibly incomplete).
+    """
+    TIMEOUT_S = 120
+    MIN_SAMPLES = 8                # stable readings kept (after the first 3) before a press counts
+    MAX_SAMPLES = 50               # readings collected per press, the dropped ones included
+    TARGETS = [(40, 40), (440, 40), (440, 280), (40, 280), (240, 160)]
+
+    # Layout (480x320 landscape)
+    TITLE_Y = 13                   # centers of the title and instruction lines
+    INSTRUCTION_Y = 35
+    COLOR_BARS_Y = 60              # top of the color strip (below the top corner targets)
+    COLOR_BAR_SIZE = (70, 28)
+    COLOR_BAR_GAP = 8
+    FIT_Y = 94                     # fit result: three lines above the center target
+    LOG_Y = 180                    # press log: five lines below the center target
+    LINE_HEIGHT = 18
+    TEXT_LEFT = 64                 # log and fit text stay clear of the corner targets (x 64..416)
+    FIXED_FONT_SIZE = 16
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.title_font = Fonts.get_font(GUIConstants.get_top_nav_title_font_name(), GUIConstants.get_body_font_size())
+        self.small_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.LABEL_FONT_SIZE)
+        self.fixed_font = Fonts.get_font(GUIConstants.FIXED_WIDTH_FONT_NAME, self.FIXED_FONT_SIZE)
+        self.results = []
+        self.fit = None             # (TouchCalibration or None, max error px or None)
+
+
+    @classmethod
+    def color_bars(cls):
+        """ (label, fill, text color, outline) of each box of the color strip, in order """
+        return [
+            ("RED", (255, 0, 0), "white", None),
+            ("GREEN", (0, 255, 0), "black", None),
+            ("BLUE", (0, 0, 255), "white", None),
+            ("WHITE", (255, 255, 255), "black", None),
+            ("ORANGE", GUIConstants.ACCENT_COLOR, "black", None),
+            ("BLACK", (0, 0, 0), "white", (255, 255, 255)),
+        ]
+
+
+    @classmethod
+    def color_bar_rects(cls):
+        width, height = cls.COLOR_BAR_SIZE
+        count = len(cls.color_bars())
+        total = count * width + (count - 1) * cls.COLOR_BAR_GAP
+        x = int((480 - total) / 2)
+        rects = []
+        for _ in range(count):
+            rects.append((x, cls.COLOR_BARS_Y, x + width - 1, cls.COLOR_BARS_Y + height - 1))
+            x += width + cls.COLOR_BAR_GAP
+        return rects
+
+
+    def fit_lines(self) -> list[str]:
+        if self.fit is None:
+            return []
+        calibration, max_error = self.fit
+        if calibration is None:
+            return ["fit failed: points collinear"]
+        a, b, c, d, e, f = calibration.as_tuple()
+        return [
+            f"fit err {max_error:.0f} px",
+            f"a={a:.5f} b={b:.5f} c={c:.2f}",
+            f"d={d:.5f} e={e:.5f} f={f:.2f}",
+        ]
+
+
+    def _render_target(self, index: int):
+        x, y = self.TARGETS[index]
+        if index < len(self.results):
+            color = GUIConstants.LABEL_FONT_COLOR            # done
+        elif index == len(self.results):
+            color = GUIConstants.ACCENT_COLOR                # press this one next
+        else:
+            color = GUIConstants.BODY_FONT_COLOR
+        size = 8
+        self.image_draw.ellipse((x - size, y - size, x + size, y + size), outline=color, width=2)
+        self.image_draw.line((x - 12, y, x + 12, y), fill=color, width=1)
+        self.image_draw.line((x, y - 12, x, y + 12), fill=color, width=1)
+        # Number beside the target, on the side facing the middle of the screen
+        label_x = x + 22 if x <= 240 else x - 22
+        self.image_draw.text((label_x, y), str(index + 1), fill=color, font=self.fixed_font, anchor="mm")
+
+
+    def _render(self):
+        self.clear_screen()
+        draw = self.image_draw
+        center_x = int(self.canvas_width / 2)
+        draw.text((center_x, self.TITLE_Y), "Touch test", fill=GUIConstants.BODY_FONT_COLOR, font=self.title_font, anchor="mm")
+
+        if len(self.results) < len(self.TARGETS):
+            instruction, color = "Hold each target ~1 s, in order 1-5", GUIConstants.LABEL_FONT_COLOR
+        else:
+            instruction, color = "Touch anywhere to continue", GUIConstants.BODY_FONT_COLOR
+        draw.text((center_x, self.INSTRUCTION_Y), instruction, fill=color, font=self.small_font, anchor="mm")
+
+        # Color strip: redrawn with every refresh of this screen
+        for (label, fill, text_color, outline), rect in zip(self.color_bars(), self.color_bar_rects()):
+            draw.rectangle(rect, fill=fill, outline=outline, width=1)
+            draw.text((int((rect[0] + rect[2]) / 2), int((rect[1] + rect[3]) / 2)), label, fill=text_color, font=self.small_font, anchor="mm")
+
+        for i, line in enumerate(self.fit_lines()):
+            draw.text((self.TEXT_LEFT, self.FIT_Y + i * self.LINE_HEIGHT), line, fill=GUIConstants.BODY_FONT_COLOR, font=self.fixed_font)
+
+        for index in range(len(self.TARGETS)):
+            self._render_target(index)
+
+        for i, stats in enumerate(self.results):
+            draw.text((self.TEXT_LEFT, self.LOG_Y + i * self.LINE_HEIGHT), stats.log_line(i + 1), fill=GUIConstants.BODY_FONT_COLOR, font=self.fixed_font)
+
+
+    def _refresh(self):
+        with self.renderer.lock:
+            self._render()
+            self.renderer.show_image()
+
+
+    def _run(self):
+        import logging
+        from seedsigner.hardware.touch import TouchCalibration, press_stats
+        logger = logging.getLogger(__name__)
+
+        device = self.hw_inputs._get_touch_device()
+        if device is None:
+            return self.results
+
+        try:
+            for index in range(len(self.TARGETS)):
+                deadline = time.time() + self.TIMEOUT_S
+                # The previous press (or a finger left on the panel) must go first
+                if not wait_touch_release(device, deadline):
+                    return self.results
+                samples = read_raw_press(device, deadline, self.MIN_SAMPLES, self.MAX_SAMPLES)
+                if samples is None:
+                    return self.results
+                stats = press_stats(samples)
+                self.results.append(stats)
+                logger.info(f"Touch test target {self.TARGETS[index]}: {stats.log_line(index + 1)}")
+
+                if len(self.results) == len(self.TARGETS):
+                    raw_points = [(r.x, r.y) for r in self.results]
+                    try:
+                        calibration = TouchCalibration.solve(raw_points, self.TARGETS)
+                        self.fit = (calibration, calibration.max_error(raw_points, self.TARGETS))
+                    except ValueError:
+                        self.fit = (None, None)
+                    logger.info(f"Touch test fit: {' | '.join(self.fit_lines())}")
+                self._refresh()
+
+            # "Touch anywhere to continue": one more deliberate press, or the timeout
+            deadline = time.time() + self.TIMEOUT_S
+            if wait_touch_release(device, deadline):
+                read_raw_press(device, deadline, self.MIN_SAMPLES, self.MIN_SAMPLES)
+            return self.results
+
+        finally:
+            # Let go of the panel before the next screen: the press that ended the test
+            # must not count there (the calibration also waits for a release first)
+            wait_touch_release(device, time.time() + 5)
+            self.hw_inputs.touch_require_release = True

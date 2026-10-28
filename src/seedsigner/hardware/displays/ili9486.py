@@ -9,12 +9,18 @@ consequences, both handled here as in the Linux driver for the same board
 - every command and every parameter is a 16-bit word: (0x00, byte), D/C low for the
   command and high for its parameters;
 - pixel data is RGB565, which is 16 bits per pixel anyway: big-endian words.
-Every transfer is an even number of bytes, so the converter never gets out of step.
-A full frame (307200 bytes) is split by `writebytes2()` into chunks of spidev's bufsiz
-(131072 bytes on SeedSigner OS: `spidev.bufsiz` in cmdline.txt), even as well; CS goes
-high between chunks, which only ends a 16-bit word boundary, and RAMWR keeps going until
-the next command. luma.lcd drives the Waveshare 3.5" (B) the same way, in 4096-byte
-chunks.
+Every transfer is an even number of bytes.
+
+Frames go out in row-aligned bands, each with its own window and RAMWR. A full frame is
+307200 bytes, more than spidev's buffer (131072 bytes on SeedSigner OS: `spidev.bufsiz`
+in cmdline.txt), so one long write was split into 131072 + 131072 + 45056-byte SPI
+transfers with CS going high in between, relying on RAMWR to carry on across them. On
+the real board it doesn't: everything after the first transfer (from row ~136.5 down)
+showed byte-swapped colors (orange as violet, white as light blue), i.e. the converter
+lost the 16-bit word alignment across the CS toggle. Now every band of at most
+FRAME_BAND_ROWS rows (128 rows = 122880 bytes, below bufsiz) is one SPI transfer that
+starts right after its own CASET/PASET/RAMWR, so no pixel data ever continues across
+transactions: 128 + 128 + 64 rows for a full frame.
 
 The init sequence (power, VCOM, gamma) and the landscape MADCTL are the Linux driver's.
 There is no backlight pin on this board: the backlight is always on.
@@ -50,6 +56,12 @@ NGAMCTRL = 0xE1       # negative gamma
 DGAMCTRL = 0xE2       # digital gamma
 
 CMD_MAX_SPEED_HZ = 10_000_000
+
+# Pixel data: at most this many rows per SPI transfer, each band with its own window and
+# RAMWR (see the module docstring). 128 rows x 480 px x 2 bytes = 122880 bytes, which
+# fits in one spidev transfer (bufsiz 131072) and is even.
+FRAME_BAND_ROWS = 128
+SPIDEV_BUFSIZ = 131072
 
 
 def words(values) -> list[int]:
@@ -139,10 +151,24 @@ class ILI9486(BaseDisplayDriver):
         if imwidth != self.width or imheight != self.height:
             raise ValueError(f"Image must be same dimensions as display ({self.width}x{self.height}).")
 
-        pixels = image_to_rgb565_be(image)
-        self._set_window(0, 0, self.width - 1, self.height - 1)
-        GPIO.output(self._dc, GPIO.HIGH)
-        self._spi.writebytes2(pixels)
+        self._write_region(0, 0, self.width, self.height, image_to_rgb565_be(image))
+
+
+    def _write_region(self, x0: int, y0: int, width: int, height: int, pixels: bytes):
+        """
+        Write `pixels` (big-endian RGB565, `width` x `height`, row by row) at (x0, y0) in
+        row-aligned bands. Each band re-sends the window (CASET, PASET) and RAMWR, then its
+        pixels in a single SPI transfer (<= bufsiz, even), so the board's converter never
+        has to keep word alignment across a CS toggle in the middle of pixel data.
+        Any partial update must go through here as well.
+        """
+        row_bytes = width * 2
+        rows_per_band = max(1, min(FRAME_BAND_ROWS, SPIDEV_BUFSIZ // row_bytes))
+        for band_y in range(0, height, rows_per_band):
+            band_rows = min(rows_per_band, height - band_y)
+            self._set_window(x0, y0 + band_y, x0 + width - 1, y0 + band_y + band_rows - 1)
+            GPIO.output(self._dc, GPIO.HIGH)
+            self._spi.writebytes2(pixels[band_y * row_bytes:(band_y + band_rows) * row_bytes])
 
 
     def cleanup(self):

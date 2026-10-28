@@ -356,6 +356,31 @@ class IOTestView(View):
 
 
 
+class TouchRawTestView(View):
+    """
+    SeedSigner Max: diagnostic touch test at boot (hw_profile.TOUCH_RAW_TEST_AT_BOOT),
+    shown once, then the boot calibration (`then_calibration`), or else the main menu
+    (or first the "remove the microSD" warning, if `then_microsd_warning`).
+    """
+    def __init__(self, then_calibration: bool = True, then_microsd_warning: bool = False):
+        super().__init__()
+        self.then_calibration = then_calibration
+        self.then_microsd_warning = then_microsd_warning
+
+
+    def run(self):
+        self.run_screen(settings_screens.TouchRawTestScreen)
+        if self.then_calibration:
+            return Destination(TouchCalibrationView, view_args={
+                "at_boot": True,
+                "then_microsd_warning": self.then_microsd_warning,
+            }, skip_current_view=True)
+        if self.then_microsd_warning:
+            return Destination(RemoveMicroSDWarningView, skip_current_view=True)
+        return Destination(MainMenuView)
+
+
+
 class TouchCalibrationView(View):
     """
     SeedSigner Max: calibrate the touch screen for this session.

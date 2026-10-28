@@ -6,13 +6,23 @@ firmware and no memory of its own, it only measures the resistive panel when the
 asks. That is why the Max uses a resistive panel instead of a capacitive one, whose
 controller is a programmable microcontroller sitting between the finger and the Pi.
 
-Wiring (see hw_profile.py): SPI0 CE1 at 1 MHz, sharing MOSI/SCLK with the display;
+Wiring (see hw_profile.py): SPI0 CE1 at 500 kHz, sharing MOSI/SCLK with the display;
 PENIRQ on a GPIO, low while the panel is pressed.
 
-Read sequence and filtering follow Paul Stoffregen's widely used XPT2046_Touchscreen
-library (MIT license): pressure first, then three X/Y pairs, keep the average of the
-two closest readings of each axis, finish with a power-down command so PENIRQ is armed
-again. One SPI transaction of 19 bytes; at 1 MHz that is ~150 us of bus time.
+Read sequence: pressure first (Z1, Z2), then each axis read several times in a row
+instead of alternating X/Y/X/Y. Every switch of the panel drivers (Z -> X, X -> Y) needs
+time to settle, all the more with the filter capacitors some boards put on the panel
+lines; alternating the axes switched them before every conversion, so one axis could
+bleed into the other. Now the drivers switch only twice, and the first conversion
+after each switch is discarded:
+
+    Z1, Z2, X (settling, discarded), X, X, X, Y (settling, discarded), Y, Y, Y + power down
+
+Each axis is the median of its three kept readings. The last command powers the ADC
+down with PENIRQ enabled again, as before. 16-clock overlapped mode and the decode are
+those of Paul Stoffregen's XPT2046_Touchscreen library (MIT license). One SPI
+transaction of 21 bytes; at 500 kHz that is ~340 us of bus time, and the slower clock
+gives each conversion a longer acquisition (settling) window.
 """
 import logging
 
@@ -29,35 +39,38 @@ CMD_X = 0x91            # A = 001
 CMD_Y = 0xD1            # A = 101
 CMD_Y_POWER_DOWN = 0xD0 # same conversion, then power down with PENIRQ enabled
 
-READ_SEQUENCE = [
-    CMD_Z1,
-    CMD_Z2, 0x00,
-    CMD_X, 0x00,        # first X after the pressure readings settles the input: discarded
-    CMD_X, 0x00,
-    CMD_Y, 0x00,
-    CMD_X, 0x00,
-    CMD_Y, 0x00,
-    CMD_X, 0x00,
-    CMD_Y_POWER_DOWN, 0x00,
-    0x00, 0x00,
+READ_SEQUENCE = [            # command sent in byte:
+    CMD_Z1,                     #  0  (k = 0)
+    CMD_Z2, 0x00,               #  1  (k = 1)
+    CMD_X, 0x00,                #  3  (k = 2)  X after Z: settling read, discarded
+    CMD_X, 0x00,                #  5  (k = 3)
+    CMD_X, 0x00,                #  7  (k = 4)
+    CMD_X, 0x00,                #  9  (k = 5)
+    CMD_Y, 0x00,                # 11  (k = 6)  Y after X: settling read, discarded
+    CMD_Y, 0x00,                # 13  (k = 7)
+    CMD_Y, 0x00,                # 15  (k = 8)
+    CMD_Y_POWER_DOWN, 0x00,     # 17  (k = 9)
+    0x00, 0x00,                 # bytes 19, 20 only clock out the last result
 ]
-# The result of the command sent at byte 2k-1 (or byte 0) arrives in bytes 2k+1, 2k+2
-# (16-clock overlapped mode): 9 results, in the order Z1, Z2, dummy, X1, Y1, X2, Y2, X3, Y3.
+# 16-clock overlapped mode: the result of the command sent at byte 0, 1, 3, 5, ... (the
+# k-th command, k = 0..9) is clocked out in bytes 2k+1 (high) and 2k+2 (low), while the
+# next command goes out in byte 2k+1. Each 16-bit word is: 1 busy bit, 12 data bits
+# (MSB first), 3 zero bits, hence `>> 3 & 0xFFF`. Byte -> result mapping:
+#   bytes  1, 2: Z1        bytes  3, 4: Z2
+#   bytes  5, 6: X0 (settling, discarded)   bytes  7, 8: X1   bytes  9, 10: X2   bytes 11, 12: X3
+#   bytes 13,14: Y0 (settling, discarded)   bytes 15,16: Y1   bytes 17, 18: Y2   bytes 19, 20: Y3
+READ_RESULTS = 10
 
 
 def decode_results(response: list[int]) -> list[int]:
-    """ The nine 12-bit conversion results packed in an 19-byte response """
-    return [((response[2 * k + 1] << 8) | response[2 * k + 2]) >> 3 & 0x0FFF for k in range(9)]
+    """ The 12-bit conversion results packed in a READ_SEQUENCE response, in command order """
+    count = (len(response) - 1) // 2
+    return [((response[2 * k + 1] << 8) | response[2 * k + 2]) >> 3 & 0x0FFF for k in range(count)]
 
 
-def best_two_average(a: int, b: int, c: int) -> int:
-    """ Average of the two closest of three readings: one outlier is simply ignored """
-    da, db, dc = abs(a - b), abs(a - c), abs(b - c)
-    if da <= db and da <= dc:
-        return (a + b) // 2
-    if db <= da and db <= dc:
-        return (a + c) // 2
-    return (b + c) // 2
+def median3(a: int, b: int, c: int) -> int:
+    """ Median of three readings: one outlier, in either direction, is simply ignored """
+    return sorted((a, b, c))[1]
 
 
 def parse_response(response: list[int], pressure_threshold: int) -> tuple[int, int, int] | None:
@@ -65,11 +78,11 @@ def parse_response(response: list[int], pressure_threshold: int) -> tuple[int, i
     (raw_x, raw_y, pressure) from a READ_SEQUENCE response, or None if the pressure is
     below `pressure_threshold` (no touch, or too light to give a trustworthy position).
     """
-    z1, z2, _, x1, y1, x2, y2, x3, y3 = decode_results(response)
+    z1, z2, _, x1, x2, x3, _, y1, y2, y3 = decode_results(response)
     pressure = z1 + 4095 - z2
     if pressure < pressure_threshold:
         return None
-    return (best_two_average(x1, x2, x3), best_two_average(y1, y2, y3), pressure)
+    return (median3(x1, x2, x3), median3(y1, y2, y3), pressure)
 
 
 

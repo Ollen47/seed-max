@@ -98,10 +98,12 @@ ST7796_SPI_SPEED_HZ = 40_000_000
 # ---------------------------------------------------------------------------------------
 # Same wiring on both boards: TP_CS = pin 26 (CE1), TP_IRQ = pin 11, MISO = pin 21,
 # MOSI/SCLK shared with the display. Each spidev device keeps its own clock, so the
-# display keeps its speed while the touch controller is read at 1 MHz (max 2.5 MHz).
+# display keeps its speed while the touch controller is read at 500 kHz (max 2.5 MHz).
+# The slow clock is deliberate: each conversion samples the panel for 3 clock cycles,
+# so 500 kHz gives the panel lines (and any filter capacitors on them) 6 us to settle.
 TOUCH_SPI_BUS = 0
 TOUCH_SPI_DEVICE = 1                 # /dev/spidev0.1
-TOUCH_SPI_SPEED_HZ = 1_000_000
+TOUCH_SPI_SPEED_HZ = 500_000
 
 # PENIRQ: low while the panel is pressed. Used only as a cheap "is anyone touching?"
 # check, so the bus is idle while nobody touches.
@@ -127,6 +129,14 @@ TOUCH_CALIBRATION = (
 # current calibration). On the first image: calibrate, write down the six values shown,
 # copy them into TOUCH_CALIBRATION above, set this to False and rebuild.
 TOUCH_CALIBRATE_AT_BOOT = True
+
+# Diagnostic "Touch test" screen at boot, before the calibration: five numbered targets,
+# and for each press the raw readings (median, spread, pressure, sample count) and, at
+# the end, the least-squares fit of the five points. It uses raw readings only, so it
+# works whatever TOUCH_CALIBRATION says. It also shows a strip of color bars (red,
+# green, blue, white, orange, black) to check the display's colors. Set to False once
+# the touch screen reads correctly.
+TOUCH_RAW_TEST_AT_BOOT = True
 
 
 # ---------------------------------------------------------------------------------------

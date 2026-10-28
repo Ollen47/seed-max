@@ -21,6 +21,7 @@ Design choices that matter for a signing device:
 - Vertical drags are reported as SWIPE steps, one per SWIPE_STEP_PX, which scrolling
   lists translate into one row each.
 """
+import math
 from collections import deque
 from dataclasses import dataclass
 
@@ -273,3 +274,57 @@ def _solve_3x3(m: list[list[float]], v: list[float]) -> tuple[float, float, floa
     for r in range(2, -1, -1):
         x[r] = (a[r][3] - sum(a[r][k] * x[k] for k in range(r + 1, 3))) / a[r][r]
     return tuple(x)
+
+
+
+# ---------------------------------------------------------------------------------------
+# Statistics of one press (raw readings), for the calibration and the touch test
+# ---------------------------------------------------------------------------------------
+PRESS_DROP_FIRST = 3        # the first readings of a press are landing noise: dropped
+
+
+@dataclass(frozen=True)
+class PressStats:
+    """
+    Summary of the raw readings of one press: median position, half the range of each
+    axis (how much the readings moved around), median pressure, number of readings.
+    """
+    x: int
+    y: int
+    x_half_range: int
+    y_half_range: int
+    pressure: int
+    samples: int
+
+    def log_line(self, number: int) -> str:
+        """ One line of the touch test log (fits in ~40 fixed-width characters) """
+        return (f"{number}  x={self.x}(±{self.x_half_range})  y={self.y}(±{self.y_half_range})"
+                f"  z={self.pressure}  k={self.samples}")
+
+
+def _median(values):
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
+def press_stats(samples, drop_first: int = PRESS_DROP_FIRST) -> PressStats | None:
+    """
+    `samples`: the (raw_x, raw_y, pressure) readings of one press, in order. The first
+    `drop_first` are dropped; None if nothing is left. The median of an even count is
+    the upper one, as everywhere else here. Half ranges are rounded up, so any spread at
+    all shows as at least 1.
+    """
+    kept = list(samples)[drop_first:]
+    if not kept:
+        return None
+    xs = [s[0] for s in kept]
+    ys = [s[1] for s in kept]
+    zs = [s[2] for s in kept]
+    return PressStats(
+        x=int(round(_median(xs))),
+        y=int(round(_median(ys))),
+        x_half_range=int(math.ceil((max(xs) - min(xs)) / 2)),
+        y_half_range=int(math.ceil((max(ys) - min(ys)) / 2)),
+        pressure=int(round(_median(zs))),
+        samples=len(kept),
+    )

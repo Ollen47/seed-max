@@ -1,7 +1,8 @@
 """
 SeedSigner Max v5: the boot-time touch calibration comes before any other screen, is
 repeated until a calibration is kept, and hands over to the "remove the microSD" warning
-when that is set to stay on screen.
+when that is set to stay on screen. The diagnostic touch test, when enabled, comes first
+of all, then the calibration.
 """
 from unittest.mock import MagicMock, patch
 
@@ -54,8 +55,34 @@ class TestBootCalibration(BaseTest):
             hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
 
 
+    def test_touch_test_before_calibration(self):
+        from seedsigner.views.settings_views import TouchRawTestView
+        hw_profile.TOUCH_CALIBRATE_AT_BOOT = True
+        hw_profile.TOUCH_RAW_TEST_AT_BOOT = True
+        try:
+            first, toast = self._start(SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS)
+            assert first.View_cls == TouchRawTestView
+            assert first.view_args == {"then_calibration": True, "then_microsd_warning": False}
+            assert not toast.called, "the 5-second microSD toast would cover the touch test"
+
+            first, toast = self._start(SettingsConstants.MICROSD_TOAST_TIMER_FOREVER)
+            assert first.View_cls == TouchRawTestView
+            assert first.view_args == {"then_calibration": True, "then_microsd_warning": True}
+
+            # Touch test only, calibration already baked into the image
+            hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
+            first, toast = self._start(SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS)
+            assert first.View_cls == TouchRawTestView
+            assert first.view_args == {"then_calibration": False, "then_microsd_warning": False}
+            assert not toast.called
+        finally:
+            hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
+            hw_profile.TOUCH_RAW_TEST_AT_BOOT = False
+
+
     def test_stock_behavior_when_disabled(self):
         hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
+        hw_profile.TOUCH_RAW_TEST_AT_BOOT = False
         first, toast = self._start(SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS)
         assert first.View_cls == MainMenuView and toast.called
         first, toast = self._start(SettingsConstants.MICROSD_TOAST_TIMER_FOREVER)
@@ -110,3 +137,34 @@ class TestBootCalibrationView(BaseTest):
         destination, shown, device = self._run([None])
         assert shown == ["TouchCalibrationScreen"]
         assert destination.View_cls == SettingsMenuView
+
+
+
+class TestBootTouchTestView(BaseTest):
+    def _run(self, **view_args):
+        from seedsigner.views.settings_views import TouchRawTestView
+        shown = []
+
+        def run_screen(view, screen_cls, **kwargs):
+            shown.append(screen_cls.__name__)
+            return []
+
+        with patch.object(TouchRawTestView, "run_screen", run_screen):
+            destination = TouchRawTestView(**view_args).run()
+        return destination, shown
+
+
+    def test_then_calibration(self):
+        from seedsigner.views.settings_views import TouchCalibrationView
+        for then_microsd_warning in (False, True):
+            destination, shown = self._run(then_calibration=True, then_microsd_warning=then_microsd_warning)
+            assert shown == ["TouchRawTestScreen"], "the touch test runs once"
+            assert destination.View_cls == TouchCalibrationView
+            assert destination.view_args == {"at_boot": True, "then_microsd_warning": then_microsd_warning}
+
+
+    def test_without_calibration(self):
+        destination, shown = self._run(then_calibration=False)
+        assert shown == ["TouchRawTestScreen"] and destination.View_cls == MainMenuView
+        destination, _ = self._run(then_calibration=False, then_microsd_warning=True)
+        assert destination.View_cls == RemoveMicroSDWarningView

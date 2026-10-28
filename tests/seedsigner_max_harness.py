@@ -230,16 +230,38 @@ def test_ili9486_driver():
     check([0, 0x00] * 4 in params, "VCOM control: four zero parameters")
 
     log.clear()
-    disp.show_image(Image.new("RGB", (480, 320), (255, 0, 0)))
+    # A frame whose rows differ, so each band can be matched to the right rows
+    from seedsigner.hardware.displays.st7796 import image_to_rgb565_be
+    frame_image = Image.new("RGB", (480, 320), (255, 0, 0))
+    ImageDraw.Draw(frame_image).rectangle((0, 128, 479, 255), fill=(0, 255, 0))
+    ImageDraw.Draw(frame_image).rectangle((0, 256, 479, 319), fill=(255, 159, 10))
+    expected_pixels = image_to_rgb565_be(frame_image)
+    disp.show_image(frame_image)
     traffic = bus(log)
-    check([(t[0], t[2]) for t in traffic[:6]] == [
-        (0, [0, 0x2A]), (1, [0, 0, 0, 0, 0, 0x01, 0, 0xDF]),
-        (0, [0, 0x2B]), (1, [0, 0, 0, 0, 0, 0x01, 0, 0x3F]),
-        (0, [0, 0x2C]), (1, traffic[5][2])], "window 0..479 x 0..319, then RAMWR, D/C right for each")
-    frame = traffic[-1]
-    check(frame[1] == "pixels" and frame[0] == 1 and len(frame[2]) == 480 * 320 * 2 and frame[2][:2] == bytes([0xF8, 0x00]),
-          "pixels with D/C high: full frame of 307200 bytes, big-endian RGB565, at the full clock")
-    check(all(chunk % 2 == 0 for chunk in (131072, 131072, 307200 - 2 * 131072)), "spidev.bufsiz chunks stay 16-bit aligned")
+
+    def word16(value):
+        return [0, value >> 8, 0, value & 0xFF]
+
+    # Each band: CASET 0..479, PASET first..last row, RAMWR (all D/C low commands with
+    # D/C high parameters, at 10 MHz), then the band's pixels with D/C high, one transfer
+    expected = []
+    for first, last in ((0, 127), (128, 255), (256, 319)):
+        expected += [
+            (0, "xfer", [0, 0x2A]), (1, "xfer", word16(0) + word16(479)),
+            (0, "xfer", [0, 0x2B]), (1, "xfer", word16(first) + word16(last)),
+            (0, "xfer", [0, 0x2C]),
+            (1, "pixels", expected_pixels[first * 960:(last + 1) * 960]),
+        ]
+    check([(t[0], t[1], t[2]) for t in traffic] == expected,
+          "frame in 3 row bands (128 + 128 + 64 rows), each with its own CASET/PASET/RAMWR, then its pixels with D/C high")
+    pixel_transfers = [t[2] for t in traffic if t[1] == "pixels"]
+    check([len(p) for p in pixel_transfers] == [122880, 122880, 61440] and sum(len(p) for p in pixel_transfers) == 307200,
+          "pixel transfers of 122880 + 122880 + 61440 = 307200 bytes")
+    check(all(len(t[2]) % 2 == 0 and len(t[2]) <= 131072 for t in traffic),
+          "every transfer is even and fits in one spidev transfer (bufsiz 131072): no CS toggle inside pixel data")
+    check(all(t[3] == 10_000_000 for t in traffic if t[1] == "xfer"), "window and RAMWR at the 10 MHz command speed")
+    check(pixel_transfers[0][:2] == bytes([0xF8, 0x00]) and pixel_transfers[1][:2] == bytes([0x07, 0xE0]),
+          "big-endian RGB565: red band, then green band")
 
     log.clear()
     disp.invert(enabled=True)
@@ -277,6 +299,7 @@ def test_boot_calibration_view():
     from seedsigner.views.settings_views import TouchCalibrationView, SettingsMenuView
     from seedsigner.views.view import MainMenuView
     check(hw_profile.TOUCH_CALIBRATE_AT_BOOT is True, "the first v5 image calibrates the touch screen at boot")
+    check(hw_profile.TOUCH_RAW_TEST_AT_BOOT is True, "the touch test is on by default, before the calibration")
     hw, _ = setup_inputs()
     saved = hw.touch_device
     hw.touch_device = None
@@ -303,7 +326,8 @@ def test_xpt2046_driver():
         return response
 
     spi = MagicMock()
-    spi.xfer2 = MagicMock(return_value=response_for([800, 3500, 0, 1000, 2000, 1010, 2010, 1005, 2005]))
+    # Z1, Z2, X0 (settling), X1-X3, Y0 (settling), Y1-Y3
+    spi.xfer2 = MagicMock(return_value=response_for([800, 3500, 3999, 1000, 1010, 1005, 5, 2000, 2010, 2005]))
     spidev.SpiDev = MagicMock(return_value=spi)
     GPIO.LOW = 0
     irq = {"level": 1}
@@ -311,7 +335,7 @@ def test_xpt2046_driver():
 
     touch = XPT2046(calibration=TouchCalibration(0.1, 0.0, 0.0, 0.0, 0.1, 0.0))
     check(spidev.SpiDev.call_args.args == (0, 1), "touch controller on SPI0 CE1")
-    check(spi.max_speed_hz == 1_000_000, "touch read at 1 MHz")
+    check(spi.max_speed_hz == 500_000, "touch read at 500 kHz (longer acquisition)")
     check(spi.xfer2.call_args.args[0] == [0xD0, 0, 0], "init powers down with PENIRQ armed")
 
     spi.xfer2.reset_mock()
@@ -319,9 +343,13 @@ def test_xpt2046_driver():
 
     irq["level"] = 0
     position = touch.read()
-    check(spi.xfer2.call_args.args[0] == READ_SEQUENCE, "PENIRQ low: one 19-byte read sequence")
-    # best two of (1000, 1010, 1005) -> 1002, of (2000, 2010, 2005) -> 2002; x0.1 each
-    check(position == (100, 200), f"raw (1002, 2002) mapped through the calibration: {position}")
+    sent = spi.xfer2.call_args.args[0]
+    check(sent == READ_SEQUENCE and len(sent) == 21, "PENIRQ low: one 21-byte read sequence")
+    check([sent[0]] + sent[1:19:2] == [0xB1, 0xC1, 0x91, 0x91, 0x91, 0x91, 0xD1, 0xD1, 0xD1, 0xD0],
+          "Z1, Z2, X x4, Y x4 in a row, the last Y powering down with PENIRQ armed")
+    # medians of (1000, 1010, 1005) and (2000, 2010, 2005); settling reads ignored; x0.1 each
+    check(position == (100, 200), f"raw (1005, 2005) mapped through the calibration: {position}")
+    check(touch.read_raw() == (1005, 2005, 1395), "read_raw() still returns (raw_x, raw_y, pressure)")
 
 
 
@@ -743,6 +771,107 @@ def test_touch_calibration():
 
 
 
+class SequenceRawTouch:
+    """ Raw readings from a fixed list (None = no contact), one per read_raw() call """
+    def __init__(self, readings):
+        self.readings = list(readings)
+
+    def read_raw(self):
+        return self.readings.pop(0) if self.readings else None
+
+
+def test_press_reading_drops_landing_noise():
+    from seedsigner.gui.screens.settings_screens import TouchCalibrationScreen, read_raw_press
+    hw, _ = setup_inputs()
+    wild = [(3900, 100, 450), (200, 3800, 500), (3000, 3000, 600)]
+    steady = [(1000 + i % 3, 2000 - i % 2, 1200) for i in range(8)]
+    screen = TouchCalibrationScreen()
+    point = screen._read_press(SequenceRawTouch(wild + steady + [None]), time.time() + 2)
+    check(point == (1001, 2000), f"calibration: the first 3 readings of a press are dropped: {point}")
+    # MIN_SAMPLES counts the readings kept after the drop: 3 + 7 is still a bounce
+    check(read_raw_press(SequenceRawTouch(wild + steady[:7] + [None]), time.time() + 0.3, 8, 25) is None,
+          "3 dropped + 7 readings: too short, not a press")
+
+
+def test_touch_raw_test_screen():
+    """ The diagnostic touch test: five presses, raw statistics, fit, color bars """
+    from seedsigner.gui.components import GUIConstants
+    from seedsigner.gui.screens.settings_screens import TouchRawTestScreen
+    hw, _ = setup_inputs()
+    truth = TouchCalibration(0.0, 0.1297, -25.9, -0.0865, 0.0, 345.9)       # swapped + mirrored
+    device = FakeRawTouch(truth)
+    hw.touch_device = device
+    renderer = Renderer.get_instance()
+
+    screen = TouchRawTestScreen()
+    check(screen.TARGETS == [(40, 40), (440, 40), (440, 280), (40, 280), (240, 160)], "targets 1-5: corners, then center")
+
+    def landing(target):
+        # ~30 ms of a wild reading as the stylus lands, then steady on the target
+        return lambda t: (479 - target[0], 319 - target[1]) if t < 0.03 else target
+
+    script = [(0.3, None)]
+    for target in screen.TARGETS:
+        script += [(0.35, landing(target)), (0.25, None)]
+    script += [(0.3, (100, 100)), (1.0, None)]            # "Touch anywhere to continue"
+    device.set_script(script)
+    hw.touch_require_release = False
+
+    shown = []
+    original_show = renderer.show_image
+    def spy_show(*args, **kwargs):
+        shown.append(len(screen.results))
+        return original_show(*args, **kwargs)
+    renderer.show_image = spy_show
+    try:
+        started = time.monotonic()
+        results = screen.display()
+        elapsed = time.monotonic() - started
+    finally:
+        renderer.show_image = original_show
+    screenshot("max_touch_test.png")
+
+    check(len(results) == 5, f"five presses logged: {len(results)}")
+    check(shown[0] == 0 and [n for n in shown[1:]] == [1, 2, 3, 4, 5], f"whole screen redrawn after each press: {shown}")
+    worst = 0
+    for stats, target in zip(results, screen.TARGETS):
+        x, y = truth.to_screen(stats.x, stats.y, 480, 320)
+        worst = max(worst, abs(x - target[0]), abs(y - target[1]))
+    check(worst <= 1, f"each logged median maps back onto its target (within {worst} px)")
+    check(all(r.samples >= 8 and r.pressure == 1000 for r in results), "sample counts and pressure logged")
+    check(all(r.samples <= TouchRawTestScreen.MAX_SAMPLES - 3 for r in results), "up to 50 readings per press, the first 3 dropped")
+    calibration, max_error = screen.fit
+    check(calibration is not None and max_error < 2, f"5-point fit: error {max_error:.2f} px")
+    check(screen.fit_lines()[0] == f"fit err {max_error:.0f} px" and len(screen.fit_lines()) == 3, f"fit shown: {screen.fit_lines()}")
+    check(hw.touch_require_release, "the press that ends the test can't leak into the next screen")
+    check(elapsed < 6.0, f"continues right after the press that follows the 5th ({elapsed:.1f} s)")
+
+    # The final screen: log lines, fit, color bars
+    canvas = renderer.canvas
+    lines = [r.log_line(i + 1) for i, r in enumerate(results)] + screen.fit_lines()
+    widest = max(screen.fixed_font.getlength(line) for line in lines)
+    check(all(len(line) <= 44 for line in lines) and screen.TEXT_LEFT + widest < 420,
+          f"text fits between the corner targets (widest {widest:.0f} px)")
+    check(lines[0].startswith("1  x=") and "  y=" in lines[0] and "  z=1000  k=" in lines[0], f"log line format: {lines[0]!r}")
+    rects = screen.color_bar_rects()
+    colors = [canvas.getpixel((rect[0] + 4, rect[3] - 3)) for rect in rects]
+    accent = tuple(int(GUIConstants.ACCENT_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+    check(colors == [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), accent, (0, 0, 0)],
+          f"color strip: red, green, blue, white, UI orange, black: {colors}")
+    check(canvas.getpixel((rects[5][0], rects[5][1] + 10)) == (255, 255, 255), "the black box has a white border")
+    check(rects[0][1] > 40 + 12 and rects[0][3] < screen.FIT_Y and rects[0][0] >= 0 and rects[-1][2] < 480,
+          "color strip below the title and the top targets, above the log")
+
+    # Nobody touches: the test gives up and the boot goes on
+    class QuickTest(TouchRawTestScreen):
+        TIMEOUT_S = 0.5
+    device.set_script([(5.0, None)])
+    started = time.monotonic()
+    results = QuickTest().display()
+    check(results == [] and time.monotonic() - started < 2.0, "no touch for TIMEOUT_S: continues without results")
+
+
+
 # ---------------------------------------------------------------------------------------
 # Power pins
 # ---------------------------------------------------------------------------------------
@@ -831,6 +960,8 @@ if __name__ == "__main__":
     test_camera_loops_get_touch_input()
     test_qr_display_centered()
     test_touch_calibration()
+    test_press_reading_drops_landing_noise()
+    test_touch_raw_test_screen()
     test_power_pins()
     test_io_test_screen_touch()
 
