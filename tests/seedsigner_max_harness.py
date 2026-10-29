@@ -300,8 +300,8 @@ def test_display_choice_locked():
 def test_boot_calibration_view():
     from seedsigner.views.settings_views import TouchCalibrationView, SettingsMenuView
     from seedsigner.views.view import MainMenuView
-    check(hw_profile.TOUCH_CALIBRATE_AT_BOOT is True, "the first v5 image calibrates the touch screen at boot")
-    check(hw_profile.TOUCH_RAW_TEST_AT_BOOT is True, "the touch test is on by default, before the calibration")
+    check(hw_profile.TOUCH_CALIBRATE_AT_BOOT is False and hw_profile.TOUCH_RAW_TEST_AT_BOOT is False,
+          "calibrated image: no touch test and no calibration at boot")
     hw, _ = setup_inputs()
     saved = hw.touch_device
     hw.touch_device = None

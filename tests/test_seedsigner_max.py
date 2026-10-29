@@ -164,11 +164,21 @@ def test_to_screen_clamps_to_the_display():
     assert cal.to_screen(123.4, 56.6, 480, 320) == (123, 57)
 
 
-def test_default_calibration_maps_the_raw_range_onto_the_screen():
+def test_built_in_calibration_maps_the_touch_test_presses_onto_their_targets():
+    """ Raw medians of the 29 Oct 2026 touch test, through the calibration in the image """
     from seedsigner.hardware import hw_profile
     cal = TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
-    assert cal.to_screen(200, 200, 480, 320) == (0, 0)
-    assert cal.to_screen(3900, 3900, 480, 320) == (479, 319)
+    presses = {(40, 40): (489, 3462), (440, 40): (3661, 3519), (440, 280): (3634, 737),
+               (40, 280): (533, 670), (240, 160): (2121, 2195)}
+    for (tx, ty), raw in presses.items():
+        x, y = cal.to_screen(*raw, 480, 320)
+        assert abs(x - tx) <= 10 and abs(y - ty) <= 10, (raw, (x, y), (tx, ty))
+
+
+def test_boot_screens_off_in_the_calibrated_image():
+    from seedsigner.hardware import hw_profile
+    assert hw_profile.TOUCH_CALIBRATE_AT_BOOT is False
+    assert hw_profile.TOUCH_RAW_TEST_AT_BOOT is False
 
 
 

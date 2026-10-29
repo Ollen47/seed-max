@@ -116,27 +116,30 @@ TOUCH_PRESSURE_THRESHOLD = 400
 # Raw ADC -> screen coordinate calibration, as an affine transform:
 #   x = A*raw_x + B*raw_y + C
 #   y = D*raw_x + E*raw_y + F
-# A generic starting point (axes swapped, raw values from ~200 to ~3900). The real
-# values depend on the panel: see TOUCH_CALIBRATE_AT_BOOT below.
+# This panel (Waveshare 3.5inch RPi LCD (A), MADCTL 0xE8), four-cross calibration of
+# 29 Oct 2026, max error 1.8 px: raw X runs along the screen's x (~260 at the left
+# edge, ~3780 at the right), raw Y against the screen's y (~3930 at the top, ~200 at the
+# bottom). Recalibrate (Settings > Advanced > Hardware > Touch calibration) if the
+# panel or MADCTL ever changes.
 TOUCH_CALIBRATION = (
-    0.0, 480 / 3700, -200 * 480 / 3700,     # A, B, C
-    320 / 3700, 0.0, -200 * 320 / 3700,     # D, E, F
+    0.12749, 0.00182, -29.54,               # A, B, C
+    0.00066, -0.08586, 337.51,              # D, E, F
 )
 
 # With an uncalibrated panel the menus may be impossible to hit, so the calibration
 # screen could not be reached. While this is True, the four-cross calibration runs at
 # every boot, before the main menu (it only needs presses on the crosses, whatever the
 # current calibration). On the first image: calibrate, write down the six values shown,
-# copy them into TOUCH_CALIBRATION above, set this to False and rebuild.
-TOUCH_CALIBRATE_AT_BOOT = True
+# copy them into TOUCH_CALIBRATION above, set this to False and rebuild. Done: False.
+TOUCH_CALIBRATE_AT_BOOT = False
 
 # Diagnostic "Touch test" screen at boot, before the calibration: five numbered targets,
 # and for each press the raw readings (median, spread, pressure, sample count) and, at
 # the end, the least-squares fit of the five points. It uses raw readings only, so it
 # works whatever TOUCH_CALIBRATION says. It also shows a strip of color bars (red,
 # green, blue, white, orange, black) to check the display's colors. Set to False once
-# the touch screen reads correctly.
-TOUCH_RAW_TEST_AT_BOOT = True
+# the touch screen reads correctly. Done (29 Oct 2026): False.
+TOUCH_RAW_TEST_AT_BOOT = False
 
 
 # ---------------------------------------------------------------------------------------
