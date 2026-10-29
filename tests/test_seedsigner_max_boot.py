@@ -80,6 +80,43 @@ class TestBootCalibration(BaseTest):
             hw_profile.TOUCH_RAW_TEST_AT_BOOT = False
 
 
+    def test_controller_goes_from_touch_test_to_calibration(self):
+        """
+        Regression (first boot of the 0010 image): the touch test returned its next
+        Destination with skip_current_view, the Controller popped the empty back stack
+        outside its exception handler, blanked the screen and quit. The Controller loop
+        must hand over from the touch test to the calibration, and on to the main menu.
+        """
+        from seedsigner.views.settings_views import TouchCalibrationView, TouchRawTestView
+        hw_profile.TOUCH_CALIBRATE_AT_BOOT = True
+        hw_profile.TOUCH_RAW_TEST_AT_BOOT = True
+        seen = []
+        real_run_view = Destination._run_view
+
+        def run_views(destination, *args, **kwargs):
+            seen.append(destination.View_cls)
+            if destination.View_cls in (TouchRawTestView, TouchCalibrationView) and len(seen) <= 2:
+                # The real View logic; only its screens are skipped
+                with patch.object(destination.View_cls, "run_screen", lambda view, screen_cls, **kw: [] if screen_cls.__name__ == "TouchRawTestScreen" else None), \
+                     patch("seedsigner.hardware.buttons.HardwareButtons.get_instance", return_value=MagicMock(_get_touch_device=lambda: None)):
+                    return real_run_view(destination)
+            raise Stop()
+
+        Controller.get_instance().settings.set_value(SettingsConstants.SETTING__MICROSD_TOAST_TIMER, SettingsConstants.MICROSD_TOAST_TIMER_FIVE_SECONDS)
+        try:
+            with patch.object(Destination, "_run_view", run_views), \
+                 patch("seedsigner.views.screensaver.OpeningSplashView.run"), \
+                 patch.object(Controller, "activate_toast"):
+                try:
+                    Controller.get_instance().start()
+                except Stop:
+                    pass
+        finally:
+            hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
+            hw_profile.TOUCH_RAW_TEST_AT_BOOT = False
+        assert seen == [TouchRawTestView, TouchCalibrationView, MainMenuView], seen
+
+
     def test_stock_behavior_when_disabled(self):
         hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
         hw_profile.TOUCH_RAW_TEST_AT_BOOT = False

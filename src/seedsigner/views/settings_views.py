@@ -369,14 +369,18 @@ class TouchRawTestView(View):
 
 
     def run(self):
+        # No skip_current_view here: this is the first View after boot, so it isn't on
+        # the Controller's back stack yet, and skipping it would pop from an empty stack.
+        # That IndexError is raised outside the Controller's exception handler: the app
+        # blanked the screen and quit (the black screen after "Touch anywhere").
         self.run_screen(settings_screens.TouchRawTestScreen)
         if self.then_calibration:
             return Destination(TouchCalibrationView, view_args={
                 "at_boot": True,
                 "then_microsd_warning": self.then_microsd_warning,
-            }, skip_current_view=True)
+            })
         if self.then_microsd_warning:
-            return Destination(RemoveMicroSDWarningView, skip_current_view=True)
+            return Destination(RemoveMicroSDWarningView)
         return Destination(MainMenuView)
 
 

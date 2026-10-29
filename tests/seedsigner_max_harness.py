@@ -245,7 +245,8 @@ def test_ili9486_driver():
     # Each band: CASET 0..479, PASET first..last row, RAMWR (all D/C low commands with
     # D/C high parameters, at 10 MHz), then the band's pixels with D/C high, one transfer
     expected = []
-    for first, last in ((0, 127), (128, 255), (256, 319)):
+    for first in range(0, 320, 64):
+        last = first + 63
         expected += [
             (0, "xfer", [0, 0x2A]), (1, "xfer", word16(0) + word16(479)),
             (0, "xfer", [0, 0x2B]), (1, "xfer", word16(first) + word16(last)),
@@ -253,15 +254,16 @@ def test_ili9486_driver():
             (1, "pixels", expected_pixels[first * 960:(last + 1) * 960]),
         ]
     check([(t[0], t[1], t[2]) for t in traffic] == expected,
-          "frame in 3 row bands (128 + 128 + 64 rows), each with its own CASET/PASET/RAMWR, then its pixels with D/C high")
+          "frame in 5 row bands of 64 rows, each with its own CASET/PASET/RAMWR, then its pixels with D/C high")
     pixel_transfers = [t[2] for t in traffic if t[1] == "pixels"]
-    check([len(p) for p in pixel_transfers] == [122880, 122880, 61440] and sum(len(p) for p in pixel_transfers) == 307200,
-          "pixel transfers of 122880 + 122880 + 61440 = 307200 bytes")
-    check(all(len(t[2]) % 2 == 0 and len(t[2]) <= 131072 for t in traffic),
-          "every transfer is even and fits in one spidev transfer (bufsiz 131072): no CS toggle inside pixel data")
+    check([len(p) for p in pixel_transfers] == [61440] * 5 and sum(len(p) for p in pixel_transfers) == 307200,
+          "pixel transfers of 5 x 61440 = 307200 bytes")
+    check(all(len(t[2]) % 2 == 0 and len(t[2]) < 65536 for t in traffic),
+          "every transfer is even and under 64 KiB (the colors broke ~65536 bytes into a 122880-byte band)")
     check(all(t[3] == 10_000_000 for t in traffic if t[1] == "xfer"), "window and RAMWR at the 10 MHz command speed")
-    check(pixel_transfers[0][:2] == bytes([0xF8, 0x00]) and pixel_transfers[1][:2] == bytes([0x07, 0xE0]),
-          "big-endian RGB565: red band, then green band")
+    check(pixel_transfers[0][:2] == bytes([0xF8, 0x00]) and pixel_transfers[2][:2] == bytes([0x07, 0xE0])
+          and pixel_transfers[4] == expected_pixels[256 * 960:],
+          "big-endian RGB565: red bands, then green, then orange")
 
     log.clear()
     disp.invert(enabled=True)
@@ -345,11 +347,13 @@ def test_xpt2046_driver():
     position = touch.read()
     sent = spi.xfer2.call_args.args[0]
     check(sent == READ_SEQUENCE and len(sent) == 21, "PENIRQ low: one 21-byte read sequence")
-    check([sent[0]] + sent[1:19:2] == [0xB1, 0xC1, 0x91, 0x91, 0x91, 0x91, 0xD1, 0xD1, 0xD1, 0xD0],
-          "Z1, Z2, X x4, Y x4 in a row, the last Y powering down with PENIRQ armed")
+    check(sent[0:20:2] == [0xB1, 0xC1, 0x91, 0x91, 0x91, 0x91, 0xD1, 0xD1, 0xD1, 0xD0] and sent[1:21:2] == [0] * 10,
+          "Z1, Z2, X x4, Y x4 in a row, each command in an even byte, the last Y powering down with PENIRQ armed")
     # medians of (1000, 1010, 1005) and (2000, 2010, 2005); settling reads ignored; x0.1 each
     check(position == (100, 200), f"raw (1005, 2005) mapped through the calibration: {position}")
     check(touch.read_raw() == (1005, 2005, 1395), "read_raw() still returns (raw_x, raw_y, pressure)")
+    check(touch.last_response == response_for([800, 3500, 3999, 1000, 1010, 1005, 5, 2000, 2010, 2005]),
+          "the bytes of the last read are kept for the touch test's raw dump")
 
 
 
@@ -815,6 +819,7 @@ def test_touch_raw_test_screen():
         script += [(0.35, landing(target)), (0.25, None)]
     script += [(0.3, (100, 100)), (1.0, None)]            # "Touch anywhere to continue"
     device.set_script(script)
+    device.last_response = [0x00, 0x7F, 0xF8] + [0x40, 0x00] * 9     # the raw dump's source
     hw.touch_require_release = False
 
     shown = []
@@ -853,6 +858,12 @@ def test_touch_raw_test_screen():
     check(all(len(line) <= 44 for line in lines) and screen.TEXT_LEFT + widest < 420,
           f"text fits between the corner targets (widest {widest:.0f} px)")
     check(lines[0].startswith("1  x=") and "  y=" in lines[0] and "  z=1000  k=" in lines[0], f"log line format: {lines[0]!r}")
+    raw = screen.raw_line()
+    check(raw == "r 7FF8" + "4000" * 9, f"raw dump: bytes 1-20 of the last read, as ten 16-bit words: {raw!r}")
+    raw_width = screen.fixed_font.getlength(raw)
+    raw_box = canvas.crop((0, screen.RAW_Y, 480, 320))
+    check(screen.TEXT_LEFT + raw_width < 420 and screen.RAW_Y >= 280 + 13 and raw_box.getbbox() is not None,
+          f"raw dump drawn under the bottom targets, between them ({screen.TEXT_LEFT}..{screen.TEXT_LEFT + raw_width:.0f} px)")
     rects = screen.color_bar_rects()
     colors = [canvas.getpixel((rect[0] + 4, rect[3] - 3)) for rect in rects]
     accent = tuple(int(GUIConstants.ACCENT_COLOR[i:i + 2], 16) for i in (1, 3, 5))

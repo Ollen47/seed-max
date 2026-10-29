@@ -186,13 +186,64 @@ def encode_response(values):
 
 
 def test_read_sequence_shape():
-    """ Z1, Z2, then X four times and Y four times in a row, ending with the power down """
+    """
+    Z1, Z2, then X four times and Y four times in a row, ending with the power down. Each
+    command in an even byte (0, 2, ... 18), as Stoffregen's transfer16() sends it.
+    """
     assert len(READ_SEQUENCE) == 21
-    commands = [READ_SEQUENCE[0]] + READ_SEQUENCE[1:19:2]
+    commands = READ_SEQUENCE[0:20:2]
     assert commands == [CMD_Z1, CMD_Z2, CMD_X, CMD_X, CMD_X, CMD_X, CMD_Y, CMD_Y, CMD_Y, CMD_Y_POWER_DOWN]
     assert len(commands) == READ_RESULTS
-    assert READ_SEQUENCE[2:21:2] == [0x00] * 10      # the other bytes only clock data out
-    assert READ_SEQUENCE[-4] == 0xD0                  # last command powers down, arms PENIRQ
+    assert READ_SEQUENCE[1:21:2] == [0x00] * 10      # the odd bytes (and byte 20) only clock data out
+    assert READ_SEQUENCE[20] == 0x00
+    assert READ_SEQUENCE[-3] == 0xD0                  # last command powers down, arms PENIRQ
+
+
+def xpt2046_answer(sequence, values):
+    """
+    What the chip sends back (16-clock overlapped mode, as seen on the board): the
+    result of a command in byte b comes out in bytes b+1 (high) and b+2 (low). A command
+    sent before the previous result is fully out takes over the following bytes.
+    `values`: the 12-bit result of each command, in order.
+    """
+    response = [0] * len(sequence)
+    commands = [i for i, byte in enumerate(sequence) if byte & 0x80]
+    for b, value in zip(commands, values):
+        word = (value & 0x0FFF) << 3
+        if b + 1 < len(response):
+            response[b + 1] = word >> 8
+        if b + 2 < len(response):
+            response[b + 2] = word & 0xFF
+    return response
+
+
+def test_layout_reads_the_chip_back_correctly():
+    """ With every command in an even byte, each result lands where it's decoded """
+    values = [800, 3500, 2222, 1000, 1004, 1002, 3333, 2000, 2003, 2001]
+    response = xpt2046_answer(READ_SEQUENCE, values)
+    assert decode_results(response) == values
+    assert parse_response(response, 400) == (1002, 2001, 1395)
+
+
+def test_old_layout_reproduces_the_board_readings():
+    """
+    The 0010 layout (Z1 in byte 0, then commands in bytes 1, 3, 5, ...): every decoded
+    value straddles two results. Its low 8 bits are the 3 trailing zeros of one result
+    and the top 4 bits of the next (so 0x00-0x0F), bits 8-11 the 4 noise bits of the
+    first. A press in the middle of the panel (2048 on both axes, noise 0..15) gave
+    readings like 0x708, 0x808, 0xC08: low byte 0x08, whatever the noise.
+    """
+    old = [CMD_Z1, CMD_Z2, 0x00, CMD_X, 0x00, CMD_X, 0x00, CMD_X, 0x00, CMD_X, 0x00,
+           CMD_Y, 0x00, CMD_Y, 0x00, CMD_Y, 0x00, CMD_Y_POWER_DOWN, 0x00, 0x00, 0x00]
+    for noise in (0, 7, 12, 15):
+        middle = 2048 + noise
+        response = xpt2046_answer(old, [800, 3500] + [middle] * 8)
+        decoded = decode_results(response)
+        assert all(v & 0xF0 == 0 for v in decoded[2:9]), [hex(v) for v in decoded]
+        assert all(v & 0xFF == 0x08 for v in decoded[2:9])          # top nibble of 2048 = 0b1000
+        assert all(v >> 8 == noise for v in decoded[2:9])           # the noise moved to the top
+    # Same press decoded with the corrected layout: the real value
+    assert parse_response(xpt2046_answer(READ_SEQUENCE, [800, 3500] + [2050] * 8), 400)[:2] == (2050, 2050)
 
 
 def test_decode_known_bytes():

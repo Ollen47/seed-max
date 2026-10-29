@@ -18,9 +18,16 @@ transfers with CS going high in between, relying on RAMWR to carry on across the
 the real board it doesn't: everything after the first transfer (from row ~136.5 down)
 showed byte-swapped colors (orange as violet, white as light blue), i.e. the converter
 lost the 16-bit word alignment across the CS toggle. Now every band of at most
-FRAME_BAND_ROWS rows (128 rows = 122880 bytes, below bufsiz) is one SPI transfer that
-starts right after its own CASET/PASET/RAMWR, so no pixel data ever continues across
-transactions: 128 + 128 + 64 rows for a full frame.
+FRAME_BAND_ROWS rows is one SPI transfer that starts right after its own
+CASET/PASET/RAMWR, so no pixel data ever continues across transactions.
+
+Bands of 128 rows (122880 bytes) were still too long: on the board the colors broke
+again ~68 rows into each 128-row band (red as blue, orange as violet: bytes swapped),
+i.e. at ~65536 bytes into the transfer, while the last band (64 rows, 61440 bytes) was
+right everywhere. A single SPI transfer longer than 64 KiB is split once more below
+spidev (the BCM2835 SPI controller counts a transfer in a 16-bit register), and the
+converter loses the word alignment there too. So FRAME_BAND_ROWS is 64: five bands of
+61440 bytes, every pixel transfer under 64 KiB.
 
 The init sequence (power, VCOM, gamma) and the landscape MADCTL are the Linux driver's.
 There is no backlight pin on this board: the backlight is always on.
@@ -58,10 +65,11 @@ DGAMCTRL = 0xE2       # digital gamma
 CMD_MAX_SPEED_HZ = 10_000_000
 
 # Pixel data: at most this many rows per SPI transfer, each band with its own window and
-# RAMWR (see the module docstring). 128 rows x 480 px x 2 bytes = 122880 bytes, which
-# fits in one spidev transfer (bufsiz 131072) and is even.
-FRAME_BAND_ROWS = 128
+# RAMWR (see the module docstring). 64 rows x 480 px x 2 bytes = 61440 bytes: even, and
+# below both spidev's bufsiz (131072) and the 64 KiB at which the colors broke.
+FRAME_BAND_ROWS = 64
 SPIDEV_BUFSIZ = 131072
+MAX_PIXEL_TRANSFER = 65535          # bytes; longer transfers broke the word alignment
 
 
 def words(values) -> list[int]:
@@ -163,7 +171,7 @@ class ILI9486(BaseDisplayDriver):
         Any partial update must go through here as well.
         """
         row_bytes = width * 2
-        rows_per_band = max(1, min(FRAME_BAND_ROWS, SPIDEV_BUFSIZ // row_bytes))
+        rows_per_band = max(1, min(FRAME_BAND_ROWS, min(SPIDEV_BUFSIZ, MAX_PIXEL_TRANSFER) // row_bytes))
         for band_y in range(0, height, rows_per_band):
             band_rows = min(rows_per_band, height - band_y)
             self._set_window(x0, y0 + band_y, x0 + width - 1, y0 + band_y + band_rows - 1)

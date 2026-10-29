@@ -23,6 +23,18 @@ down with PENIRQ enabled again, as before. 16-clock overlapped mode and the deco
 those of Paul Stoffregen's XPT2046_Touchscreen library (MIT license). One SPI
 transaction of 21 bytes; at 500 kHz that is ~340 us of bus time, and the slower clock
 gives each conversion a longer acquisition (settling) window.
+
+Byte layout (fixed after the first boot on the real board): every command goes out in
+an EVEN byte (0, 2, 4, ... 18), i.e. in the low byte of the previous result, exactly as
+Stoffregen's `SPI.transfer(0xB1); z1 = SPI.transfer16(0xC1) >> 3; ...` sends it:
+`transfer16(0xC1)` clocks out 0x00 first, then 0xC1. The result of the command in byte
+2k comes back in bytes 2k+1 (high) and 2k+2 (low). The earlier layout sent each command
+one byte too early (bytes 1, 3, 5, ...), in the high byte of the previous result: the
+chip still answered in the two bytes right after each command, so every value was read
+straddling two results, the low byte of one and the high byte of the next. On the real
+panel that gave readings whose low 8 bits were always 0x00-0x0E (the 3 trailing zero
+bits of one result followed by the top 4 bits of the next) and whose bits 8-11 were the
+4 noise bits of the previous conversion: +-1900 of spread on every press, no geometry.
 """
 import logging
 
@@ -40,22 +52,22 @@ CMD_Y = 0xD1            # A = 101
 CMD_Y_POWER_DOWN = 0xD0 # same conversion, then power down with PENIRQ enabled
 
 READ_SEQUENCE = [            # command sent in byte:
-    CMD_Z1,                     #  0  (k = 0)
-    CMD_Z2, 0x00,               #  1  (k = 1)
-    CMD_X, 0x00,                #  3  (k = 2)  X after Z: settling read, discarded
-    CMD_X, 0x00,                #  5  (k = 3)
-    CMD_X, 0x00,                #  7  (k = 4)
-    CMD_X, 0x00,                #  9  (k = 5)
-    CMD_Y, 0x00,                # 11  (k = 6)  Y after X: settling read, discarded
-    CMD_Y, 0x00,                # 13  (k = 7)
-    CMD_Y, 0x00,                # 15  (k = 8)
-    CMD_Y_POWER_DOWN, 0x00,     # 17  (k = 9)
-    0x00, 0x00,                 # bytes 19, 20 only clock out the last result
+    CMD_Z1, 0x00,               #  0  (k = 0)
+    CMD_Z2, 0x00,               #  2  (k = 1)
+    CMD_X, 0x00,                #  4  (k = 2)  X after Z: settling read, discarded
+    CMD_X, 0x00,                #  6  (k = 3)
+    CMD_X, 0x00,                #  8  (k = 4)
+    CMD_X, 0x00,                # 10  (k = 5)
+    CMD_Y, 0x00,                # 12  (k = 6)  Y after X: settling read, discarded
+    CMD_Y, 0x00,                # 14  (k = 7)
+    CMD_Y, 0x00,                # 16  (k = 8)
+    CMD_Y_POWER_DOWN, 0x00,     # 18  (k = 9)
+    0x00,                       # byte 20 only clocks out the low byte of the last result
 ]
-# 16-clock overlapped mode: the result of the command sent at byte 0, 1, 3, 5, ... (the
-# k-th command, k = 0..9) is clocked out in bytes 2k+1 (high) and 2k+2 (low), while the
-# next command goes out in byte 2k+1. Each 16-bit word is: 1 busy bit, 12 data bits
-# (MSB first), 3 zero bits, hence `>> 3 & 0xFFF`. Byte -> result mapping:
+# 16-clock overlapped mode: the k-th command (k = 0..9) goes out in byte 2k, its result
+# comes back in bytes 2k+1 (high) and 2k+2 (low), and the next command goes out in that
+# low byte, 2k+2. Each 16-bit word is: 1 busy bit, 12 data bits (MSB first), 3 zero
+# bits, hence `>> 3 & 0xFFF`. Byte -> result mapping:
 #   bytes  1, 2: Z1        bytes  3, 4: Z2
 #   bytes  5, 6: X0 (settling, discarded)   bytes  7, 8: X1   bytes  9, 10: X2   bytes 11, 12: X3
 #   bytes 13,14: Y0 (settling, discarded)   bytes 15,16: Y1   bytes 17, 18: Y2   bytes 19, 20: Y3
@@ -96,6 +108,9 @@ class XPT2046:
         self.width = width
         self.height = height
         self.calibration = calibration or TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
+        # The bytes of the last read, for the touch test's raw dump (no seed data here:
+        # only ADC readings of the panel)
+        self.last_response = None
 
         GPIO.setmode(GPIO.BOARD)
         GPIO.setwarnings(False)
@@ -119,6 +134,7 @@ class XPT2046:
         if not self.is_touched():
             return None
         response = self.spi.xfer2(list(READ_SEQUENCE))
+        self.last_response = list(response)
         return parse_response(response, self.pressure_threshold)
 
 

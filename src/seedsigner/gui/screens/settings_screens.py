@@ -613,6 +613,7 @@ class TouchRawTestScreen(BaseScreen):
     LOG_Y = 180                    # press log: five lines below the center target
     LINE_HEIGHT = 18
     TEXT_LEFT = 64                 # log and fit text stay clear of the corner targets (x 64..416)
+    RAW_Y = 298                    # raw bytes of the last read: under the bottom targets
     FIXED_FONT_SIZE = 16
 
     def __post_init__(self):
@@ -622,6 +623,18 @@ class TouchRawTestScreen(BaseScreen):
         self.fixed_font = Fonts.get_font(GUIConstants.FIXED_WIDTH_FONT_NAME, self.FIXED_FONT_SIZE)
         self.results = []
         self.fit = None             # (TouchCalibration or None, max error px or None)
+        self.raw_response = None    # bytes of the XPT2046's last read during the last press
+
+
+    def raw_line(self) -> str | None:
+        """
+        The last read's response bytes 1-20 in hex: ten 4-digit words, one per conversion
+        (Z1 Z2 X0 X1 X2 X3 Y0 Y1 Y2 Y3). A sound word is 0xxx..7FF8 with the low 3 bits
+        zero (its last hex digit 0 or 8): a quick check of the byte alignment on the board.
+        """
+        if not self.raw_response or len(self.raw_response) < 21:
+            return None
+        return "r " + "".join(f"{b:02X}" for b in self.raw_response[1:21])
 
 
     @classmethod
@@ -707,6 +720,10 @@ class TouchRawTestScreen(BaseScreen):
         for i, stats in enumerate(self.results):
             draw.text((self.TEXT_LEFT, self.LOG_Y + i * self.LINE_HEIGHT), stats.log_line(i + 1), fill=GUIConstants.BODY_FONT_COLOR, font=self.fixed_font)
 
+        raw = self.raw_line()
+        if raw:
+            draw.text((self.TEXT_LEFT, self.RAW_Y), raw, fill=GUIConstants.LABEL_FONT_COLOR, font=self.fixed_font)
+
 
     def _refresh(self):
         with self.renderer.lock:
@@ -734,6 +751,8 @@ class TouchRawTestScreen(BaseScreen):
                     return self.results
                 stats = press_stats(samples)
                 self.results.append(stats)
+                raw = getattr(device, "last_response", None)
+                self.raw_response = list(raw) if isinstance(raw, (list, tuple, bytes)) else None
                 logger.info(f"Touch test target {self.TARGETS[index]}: {stats.log_line(index + 1)}")
 
                 if len(self.results) == len(self.TARGETS):
