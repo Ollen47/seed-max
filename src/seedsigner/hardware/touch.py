@@ -9,8 +9,14 @@ the events to the screens.
 
 Design choices that matter for a signing device:
 - Debounce both ways: a contact counts only after CONTACT_SAMPLES consecutive valid
-  samples, a release only after RELEASE_SAMPLES consecutive empty ones. Resistive
-  panels flicker in and out at low pressure; this keeps one press from becoming two.
+  samples, a release only after RELEASE_SAMPLES consecutive empty ones spanning at
+  least RELEASE_MS. Resistive panels flicker in and out at low pressure, above all
+  while a finger or stylus slides; this keeps one press (or one drag) from becoming
+  two. The release is timed, not just counted: HardwareButtons.wait_for() polls the
+  panel in a tight loop (a sample every ~1-2 ms on the Pi Zero), so three samples
+  were only a few milliseconds, and any short pressure dip in the middle of a drag
+  ended it. Each restarted drag then had to cross TAP_SLOP_PX again before counting
+  SWIPE_STEP_PX, and long lists could not be scrolled on the real panel.
 - The position is the median of the last three samples, so a single wild sample (they
   happen as pressure drops at release) can't move the finger.
 - A tap is a press and release without moving: once the finger travels more than
@@ -68,7 +74,8 @@ def rect_contains(rect: tuple[int, int, int, int], x: int, y: int, margin: int =
 
 class TouchTracker:
     CONTACT_SAMPLES = 2       # ~20 ms of stable contact before a press counts
-    RELEASE_SAMPLES = 3       # ~30 ms without contact before a release counts
+    RELEASE_SAMPLES = 3       # at least this many empty samples in a row ...
+    RELEASE_MS = 60           # ... spanning at least this long before a release counts
     TAP_SLOP_PX = 20          # ~3 mm on the 3.5" panel, ~3.5 mm on the 4.0"
     SWIPE_STEP_PX = 44        # one list row (40 px button + 4 px gap)
 
@@ -80,6 +87,7 @@ class TouchTracker:
         self._contact = False
         self._pending_down = 0
         self._pending_up = 0
+        self._empty_since_ms = None
         self._recent = deque(maxlen=3)
         self._down_pos = None
         self._last_pos = None
@@ -120,6 +128,7 @@ class TouchTracker:
 
         if point is not None:
             self._pending_up = 0
+            self._empty_since_ms = None
             self._recent.append((int(point[0]), int(point[1])))
 
             if not self._contact:
@@ -159,7 +168,9 @@ class TouchTracker:
             self._pending_down = 0
             if self._contact:
                 self._pending_up += 1
-                if self._pending_up >= self.RELEASE_SAMPLES:
+                if self._empty_since_ms is None:
+                    self._empty_since_ms = now_ms
+                if self._pending_up >= self.RELEASE_SAMPLES and now_ms - self._empty_since_ms >= self.RELEASE_MS:
                     events.append(TouchEvent(
                         TouchEvent.TYPE__UP,
                         self._down_pos[0],     # where the finger landed: see module docstring

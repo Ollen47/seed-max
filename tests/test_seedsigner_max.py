@@ -32,7 +32,7 @@ class Finger:
     def hold(self, point, n=5):
         return self.samples(*([point] * n))
 
-    def lift(self, n=TouchTracker.RELEASE_SAMPLES):
+    def lift(self, n=TouchTracker.RELEASE_MS // 10 + 1):
         return self.samples(*([None] * n))
 
 
@@ -71,6 +71,45 @@ def test_release_is_debounced():
     assert f.samples(None, None, (50, 50), None, None, (51, 50)) == []   # never 3 empty in a row
     assert f.tracker.is_pressed
     assert types(f.lift()) == [TouchEvent.TYPE__UP]
+
+
+def test_release_needs_time_not_just_samples():
+    """ The real loop polls every ~1-2 ms: a few empty samples are not a release """
+    tracker = TouchTracker()
+    now = 0
+    for _ in range(5):
+        now += 2
+        tracker.feed((100, 100), now)
+    for _ in range(10):                             # 20 ms of pressure dip
+        now += 2
+        assert tracker.feed(None, now) == []
+    assert tracker.is_pressed
+    events = []
+    for _ in range(40):                             # then really lifted
+        now += 2
+        events += tracker.feed(None, now)
+    assert types(events) == [TouchEvent.TYPE__UP] and events[0].is_tap
+
+
+def test_drag_with_pressure_dips_still_scrolls():
+    """
+    A stylus sliding up 240 px on a resistive panel, sampled every 2 ms, losing
+    contact for 10-20 ms now and then: one drag, five swipe steps (44 px each), no tap.
+    """
+    tracker = TouchTracker()
+    now, events, y = 0, [], 290.0
+    for step in range(300):
+        now += 2
+        y -= 240 / 300
+        dip = step % 40 >= 33                       # 14 ms out of every 80 ms
+        events += tracker.feed(None if dip else (240, int(y)), now)
+    for _ in range(40):
+        now += 2
+        events += tracker.feed(None, now)
+    assert [e.type for e in events].count(TouchEvent.TYPE__DOWN) == 1
+    swipes = [e for e in events if e.is_swipe]
+    assert len(swipes) == 5 and all(e.direction == TouchEvent.SWIPE__UP for e in swipes)
+    assert not any(e.is_tap for e in events)
 
 
 def test_median_filter_rejects_a_wild_sample():
