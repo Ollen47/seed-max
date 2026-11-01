@@ -277,6 +277,7 @@ class INA219Gauge:
             bus = SoftI2C(gpio, hw_profile.BATTERY_I2C_SDA_PIN, hw_profile.BATTERY_I2C_SCL_PIN)
         self.bus = bus
         self.address = None
+        self.last_raw = None        # (bus voltage, shunt voltage) registers of the last good read
 
 
     def find(self) -> int | None:
@@ -315,6 +316,7 @@ class INA219Gauge:
             logger.info(f"INA219 implausible cell voltage dropped: {voltage:.3f} V")
             return None
         current_ma = decode_shunt_mv(shunt_raw) / hw_profile.BATTERY_SHUNT_OHM
+        self.last_raw = (bus_raw, shunt_raw)
         return BatteryReading(
             voltage=round(voltage, 3),
             current_ma=round(current_ma, 1),

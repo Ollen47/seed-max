@@ -90,6 +90,7 @@ class BatteryMonitor(Singleton, BaseThread):
     BATTERY_CRITICAL_PERCENT every CRITICAL_REMIND_S; never while a USB cable powers it.
     """
     CHECK_EVERY_S = 5
+    FAST_CHECK_EVERY_S = 1          # while the Battery screen is open
     CONFIRM_READINGS = 3
     REMIND_EVERY_S = 5 * 60
     CRITICAL_REMIND_S = 60
@@ -108,6 +109,8 @@ class BatteryMonitor(Singleton, BaseThread):
             monitor.reading = None
             monitor.reading_time = 0
             monitor.gauge = None
+            monitor.fast = False
+            monitor.latest = None          # last good reading, unfiltered
         return cls._instance
 
 
@@ -129,9 +132,16 @@ class BatteryMonitor(Singleton, BaseThread):
 
 
     def add_reading(self, reading, now: float = None):
-        """ Keep the median (by voltage) of the last READINGS_KEPT good readings """
+        """
+        Keep the median (by voltage) of the last READINGS_KEPT good readings. When the
+        cable is plugged in or pulled out, the readings before it describe another state:
+        they are dropped, so the change shows at once instead of after the median catches up.
+        """
         if reading is None:
             return
+        self.latest = reading
+        if self.recent and self.recent[-1].on_external_power != reading.on_external_power:
+            self.recent = []
         self.recent = (self.recent + [reading])[-self.READINGS_KEPT:]
         ordered = sorted(self.recent, key=lambda r: r.voltage)
         self.reading = ordered[len(ordered) // 2]
@@ -215,7 +225,13 @@ class BatteryMonitor(Singleton, BaseThread):
             except Exception as e:
                 logger.exception(f"Battery monitor: {e}")
 
-            time.sleep(self.CHECK_EVERY_S)
+            # Short sleeps, so opening the Battery screen speeds readings up at once
+            started = time.time()
+            while self.keep_running:
+                interval = self.FAST_CHECK_EVERY_S if self.fast else self.CHECK_EVERY_S
+                if time.time() - started >= interval:
+                    break
+                time.sleep(0.2)
 
 
     def run(self):

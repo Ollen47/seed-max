@@ -396,3 +396,46 @@ def test_final_camera_and_display_values():
     rotation = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__CAMERA_ROTATION)
     assert rotation.default_value == 90 == hw_profile.CAMERA_ROTATION
     assert rotation.default_value in [v for v, _ in rotation.selection_options]
+
+
+def test_monitor_follows_the_cable_at_once():
+    """
+    Cable in or out: the readings from before describe the other state and are dropped,
+    so icon and bolt change with the next reading, not after the median catches up.
+    """
+    m = monitor()
+    m.add_reading(BatteryReading(3.80, -450, 50))
+    m.add_reading(BatteryReading(3.79, -455, 49))
+    m.add_reading(BatteryReading(3.81, -448, 51))
+    assert m.current.percent == 50 and not m.current.on_external_power
+    m.add_reading(BatteryReading(4.20, 600, 100))             # cable in
+    assert m.current.on_external_power and m.current.percent == 100
+    m.add_reading(BatteryReading(4.19, 590, 100))
+    m.add_reading(BatteryReading(3.82, -450, 51))             # cable out
+    assert not m.current.on_external_power and m.current.percent == 51
+    assert m.latest.voltage == 3.82
+    assert len(m.recent) == 1
+
+
+def test_battery_screen_lines():
+    import sys
+    from unittest.mock import MagicMock
+    sys.modules.setdefault("RPi", MagicMock())
+    sys.modules.setdefault("RPi.GPIO", MagicMock())
+    from seedsigner.gui.screens.settings_screens import BatteryInfoScreen
+    from seedsigner.hardware.power import BatteryMonitor
+    m = BatteryMonitor.get_instance()
+    saved = (m.gauge, m.latest, m.recent, m.reading, m.reading_time)
+    try:
+        m.gauge = None
+        assert BatteryInfoScreen.lines(None) == ["INA219: not found (yet)"]
+        m.gauge = SimpleNamespace(address=0x43, last_raw=(raw_bus(3.848), raw_shunt(-400)))
+        m.recent, m.latest = [], None
+        assert BatteryInfoScreen.lines(None) == ["INA219 at 0x43", "no reading yet"]
+        m.add_reading(BatteryReading(3.848, -400.0, 52))
+        lines = BatteryInfoScreen.lines(None)
+        assert lines[:5] == ["INA219 at 0x43", "voltage   3.848 V", "current   -400.0 mA", "cable     no", "estimate  52%"]
+        assert lines[5] == "shown     52%"
+        assert lines[6] == f"raw  bus {raw_bus(3.848):04X}  shunt {raw_shunt(-400):04X}"
+    finally:
+        m.gauge, m.latest, m.recent, m.reading, m.reading_time = saved

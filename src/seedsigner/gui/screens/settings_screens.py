@@ -776,3 +776,80 @@ class TouchRawTestScreen(BaseScreen):
             # must not count there (the calibration also waits for a release first)
             wait_touch_release(device, time.time() + 5)
             self.hw_inputs.touch_require_release = True
+
+
+
+@dataclass
+class BatteryInfoScreen(BaseTopNavScreen):
+    """
+    SeedSigner Max v5: what the UPS HAT (C)'s INA219 reads, live (one reading a second
+    while the screen is open): cell voltage, current (< 0 = the cell feeds the Pi),
+    estimated charge, cable detected or not, the chip's address and the raw registers.
+    """
+    REFRESH_S = 1.0
+    TEXT_LEFT = 24
+    LINE_HEIGHT = 30
+
+    def __post_init__(self):
+        self.title = _("Battery")
+        self.show_back_button = True
+        super().__post_init__()
+        self.font = Fonts.get_font(GUIConstants.FIXED_WIDTH_FONT_NAME, 18)
+        self.threads.append(BatteryInfoScreen.RefreshThread(self))
+
+
+    def lines(self) -> list[str]:
+        from seedsigner.hardware.power import BatteryMonitor
+        monitor = BatteryMonitor.get_instance()
+        gauge = getattr(monitor, "gauge", None)
+        latest = getattr(monitor, "latest", None)
+        shown = monitor.current
+        if gauge is None or gauge.address is None:
+            return ["INA219: not found (yet)"]
+        out = [f"INA219 at 0x{gauge.address:02X}"]
+        if latest is None:
+            return out + ["no reading yet"]
+        out += [
+            f"voltage   {latest.voltage:.3f} V",
+            f"current   {latest.current_ma:+.1f} mA",
+            f"cable     {'yes' if latest.on_external_power else 'no'}",
+            f"estimate  {latest.percent}%",
+        ]
+        if shown is not None:
+            out.append(f"shown     {shown.percent}% {'(cable)' if shown.on_external_power else ''}".rstrip())
+        if gauge.last_raw:
+            bus_raw, shunt_raw = gauge.last_raw
+            out.append(f"raw  bus {bus_raw:04X}  shunt {shunt_raw:04X}")
+        return out
+
+
+    def _render(self):
+        super()._render()
+        self.render_lines()
+
+
+    def render_lines(self):
+        top = self.top_nav.height + GUIConstants.COMPONENT_PADDING
+        self.image_draw.rectangle((0, top, self.canvas_width, self.canvas_height), fill=GUIConstants.BACKGROUND_COLOR)
+        for i, line in enumerate(self.lines()):
+            self.image_draw.text((self.TEXT_LEFT, top + i * self.LINE_HEIGHT), line, fill=GUIConstants.BODY_FONT_COLOR, font=self.font)
+
+
+    class RefreshThread(BaseThread):
+        def __init__(self, screen):
+            super().__init__()
+            self.screen = screen
+
+        def run(self):
+            from seedsigner.hardware.power import BatteryMonitor
+            monitor = BatteryMonitor.get_instance()
+            monitor.fast = True
+            try:
+                while self.keep_running:
+                    time.sleep(self.screen.REFRESH_S)
+                    with self.screen.renderer.lock:
+                        self.screen.render_lines()
+                        self.screen.top_nav.render()
+                        self.screen.renderer.show_image()
+            finally:
+                monitor.fast = False

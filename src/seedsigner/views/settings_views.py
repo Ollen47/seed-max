@@ -17,6 +17,7 @@ class SettingsMenuView(View):
     HARDWARE = ButtonOption("Hardware", right_icon_name=SeedSignerIconConstants.CHEVRON_RIGHT)
     IO_TEST = ButtonOption("I/O test")
     TOUCH_CALIBRATION = ButtonOption("Touch calibration")   # SeedSigner Max
+    BATTERY = ButtonOption("Battery")                       # SeedSigner Max v5
     DONATE = ButtonOption("Donate")
 
     def __init__(self, visibility: str = SettingsConstants.VISIBILITY__GENERAL, selected_attr: str = None, initial_scroll: int = 0):
@@ -65,6 +66,8 @@ class SettingsMenuView(View):
             from seedsigner.hardware import hw_profile
             if hw_profile.is_max_profile():
                 button_data.append(self.TOUCH_CALIBRATION)
+            if hw_profile.has_battery_gauge():
+                button_data.append(self.BATTERY)
 
         elif self.visibility == SettingsConstants.VISIBILITY__DEVELOPER:
             title = _("Dev Options")
@@ -101,6 +104,9 @@ class SettingsMenuView(View):
 
         elif button_data[selected_menu_num] == self.TOUCH_CALIBRATION:
             return Destination(TouchCalibrationView)
+
+        elif button_data[selected_menu_num] == self.BATTERY:
+            return Destination(BatteryInfoView)
 
         elif button_data[selected_menu_num] == self.DONATE:
             return Destination(DonateView)
@@ -353,6 +359,14 @@ class IOTestView(View):
         self.run_screen(settings_screens.IOTestScreen)
 
         return Destination(SettingsMenuView)
+
+
+
+class BatteryInfoView(View):
+    """ SeedSigner Max v5: live INA219 readings (Settings > Advanced > Hardware > Battery) """
+    def run(self):
+        self.run_screen(settings_screens.BatteryInfoScreen)
+        return Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__HARDWARE})
 
 
 

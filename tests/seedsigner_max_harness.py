@@ -1019,6 +1019,35 @@ def test_battery_icon():
         monitor.reading, monitor.reading_time, monitor.recent = saved
 
 
+def test_battery_screen():
+    """ Settings > Advanced > Hardware > Battery: live INA219 readings """
+    import time as _time
+    from types import SimpleNamespace as NS
+    from seedsigner.gui.screens.settings_screens import BatteryInfoScreen
+    from seedsigner.hardware.ina219 import BatteryReading
+    from seedsigner.hardware.power import BatteryMonitor
+    monitor = BatteryMonitor.get_instance()
+    saved = (monitor.gauge, monitor.latest, list(monitor.recent), monitor.reading, monitor.reading_time)
+    try:
+        monitor.gauge = NS(address=0x43, last_raw=(0x1E10, 0xF060))
+        monitor.recent = []
+        monitor.add_reading(BatteryReading(3.848, -400.0, 52))
+        screen = BatteryInfoScreen()
+        with Renderer.get_instance().lock:
+            screen._render()
+        screenshot("max_battery_screen.png")
+        check(Renderer.get_instance().canvas.crop((20, 60, 460, 300)).getbbox() is not None, "Battery screen shows the readings")
+        hw, touch = setup_inputs()
+        screen = BatteryInfoScreen()
+        touch.set_script(GUARD + tap((30, 30)))
+        from seedsigner.gui.screens.screen import RET_CODE__BACK_BUTTON
+        check(screen.display() == RET_CODE__BACK_BUTTON, "back leaves the Battery screen")
+        _time.sleep(0.3)
+        check(monitor.fast is False, "fast readings stop when the screen closes")
+    finally:
+        monitor.gauge, monitor.latest, monitor.recent, monitor.reading, monitor.reading_time = saved
+
+
 def test_display_speed_setting():
     """ Settings > Advanced > Hardware > Display speed sets the pixel clock, live """
     import spidev
@@ -1066,6 +1095,7 @@ if __name__ == "__main__":
     test_io_test_screen_touch()
     test_battery_icon()
     test_display_speed_setting()
+    test_battery_screen()
 
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)
