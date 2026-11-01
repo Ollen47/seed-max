@@ -226,7 +226,7 @@ def test_ili9486_driver():
     check(commands == expected, f"init sequence in the Linux driver's order: {[hex(c) for c in commands]}")
     params = [t[2] for t in xfers if t[0] == 1]
     check([0, 0x55] in params, "16 bits per pixel")
-    check([0, 0xE8] in params, "MADCTL 0xE8: landscape as the Linux driver's rotation 0")
+    check([0, 0x28] in params, "MADCTL 0x28: landscape turned 180 degrees (header at the bottom)")
     check([0, 0x00] * 4 in params, "VCOM control: four zero parameters")
 
     log.clear()

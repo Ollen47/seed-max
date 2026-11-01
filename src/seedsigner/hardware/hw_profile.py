@@ -54,9 +54,12 @@ ILI9486_PIN_RST = 22  # BCM 25
 # 16-bit RGB565 words anyway (Linux: drivers/gpu/drm/tiny/ili9486.c, "rpi-lcd-35").
 #
 # 0xE8 = landscape (MY | MX | MV | BGR): rotation 0 of the Linux driver, with the
-# board's header at the top edge. Use 0x28 (MV | BGR) if the image is upside down
-# because of how the panel sits in your enclosure, then recalibrate the touch screen.
-ILI9486_MADCTL = 0xE8
+# board's header (and so the Pi and the UPS HAT) at the top edge.
+# 0x28 = (MV | BGR): the same landscape turned 180 degrees (MY and MX flip both axes),
+# the header at the bottom edge. The SeedSigner Max uses 0x28 (1 Nov 2026): the Pi + HAT
+# block rests in the hand at the bottom and the camera ends up on the top edge.
+# Changing it means turning TOUCH_CALIBRATION too (see there) or recalibrating.
+ILI9486_MADCTL = 0x28
 
 # SPI clock for the pixel data (commands stay at 10 MHz). The converter, not the
 # ILI9486, sets the limit. Measured on this board (1 Nov 2026, 320 px camera preview):
@@ -117,14 +120,20 @@ TOUCH_PRESSURE_THRESHOLD = 400
 # Raw ADC -> screen coordinate calibration, as an affine transform:
 #   x = A*raw_x + B*raw_y + C
 #   y = D*raw_x + E*raw_y + F
-# This panel (Waveshare 3.5inch RPi LCD (A), MADCTL 0xE8), four-cross calibration of
-# 29 Oct 2026, max error 1.8 px: raw X runs along the screen's x (~260 at the left
-# edge, ~3780 at the right), raw Y against the screen's y (~3930 at the top, ~200 at the
-# bottom). Recalibrate (Settings > Advanced > Hardware > Touch calibration) if the
-# panel or MADCTL ever changes.
+# This panel (Waveshare 3.5inch RPi LCD (A)), four-cross calibration of 29 Oct 2026 with
+# MADCTL 0xE8, max error 1.8 px:
+#   (0.12749, 0.00182, -29.54, 0.00066, -0.08586, 337.51)
+# raw X ran along the screen's x (~260 at the left edge, ~3780 at the right), raw Y
+# against the screen's y (~3930 at the top, ~200 at the bottom).
+# The touch film is glued to the glass, so turning the image 180 degrees (MADCTL 0x28)
+# leaves the raw readings where they were and only moves the pixels: the pixel that was
+# at (x, y) is now at (479 - x, 319 - y). Same calibration, turned:
+#   A, B -> -A, -B;  C -> 479 - C;  D, E -> -D, -E;  F -> 319 - F
+# Recalibrate (Settings > Advanced > Hardware > Touch calibration) if the panel or
+# MADCTL ever changes.
 TOUCH_CALIBRATION = (
-    0.12749, 0.00182, -29.54,               # A, B, C
-    0.00066, -0.08586, 337.51,              # D, E, F
+    -0.12749, -0.00182, 508.54,             # A, B, C
+    -0.00066, 0.08586, -18.51,              # D, E, F
 )
 
 # With an uncalibrated panel the menus may be impossible to hit, so the calibration
@@ -213,8 +222,11 @@ CAMERA_FPS_OVERLAY = False
 CAMERA_RESOLUTION = 320
 
 # Camera rotation default (0, 90, 180, 270; stock SeedSigner: 180). The camera sits
-# under the display's right overhang, its flex cable folded once at 45 degrees: 90.
-CAMERA_ROTATION = 90
+# under the display, its flex cable folded once at 45 degrees: 90 measured on the device
+# with MADCTL 0xE8. With the image turned 180 degrees (MADCTL 0x28) the device is held
+# the other way up, so the camera's picture turns 180 degrees with it: 90 + 180 = 270.
+# Settings > Advanced > Camera rotation changes it until the next restart.
+CAMERA_ROTATION = 270
 
 
 def is_max_profile() -> bool:

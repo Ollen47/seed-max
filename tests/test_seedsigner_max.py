@@ -204,14 +204,34 @@ def test_to_screen_clamps_to_the_display():
 
 
 def test_built_in_calibration_maps_the_touch_test_presses_onto_their_targets():
-    """ Raw medians of the 29 Oct 2026 touch test, through the calibration in the image """
+    """
+    Raw medians of the 29 Oct 2026 touch test (taken with MADCTL 0xE8), through the
+    calibration in the image. The image is now turned 180 degrees (MADCTL 0x28): the
+    same spots of the glass are now at (479 - x, 319 - y).
+    """
     from seedsigner.hardware import hw_profile
+    assert hw_profile.ILI9486_MADCTL == 0x28
     cal = TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
     presses = {(40, 40): (489, 3462), (440, 40): (3661, 3519), (440, 280): (3634, 737),
                (40, 280): (533, 670), (240, 160): (2121, 2195)}
     for (tx, ty), raw in presses.items():
+        tx, ty = 479 - tx, 319 - ty
         x, y = cal.to_screen(*raw, 480, 320)
         assert abs(x - tx) <= 10 and abs(y - ty) <= 10, (raw, (x, y), (tx, ty))
+
+
+def test_turned_calibration_is_the_measured_one_turned_180_degrees():
+    """ Each raw reading lands on the pixel opposite to where the 0xE8 calibration put it """
+    from seedsigner.hardware import hw_profile
+    measured = TouchCalibration(0.12749, 0.00182, -29.54, 0.00066, -0.08586, 337.51)
+    turned = TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
+    for raw_x in range(200, 4000, 350):
+        for raw_y in range(150, 4000, 350):
+            ox = measured.a * raw_x + measured.b * raw_y + measured.c
+            oy = measured.d * raw_x + measured.e * raw_y + measured.f
+            nx = turned.a * raw_x + turned.b * raw_y + turned.c
+            ny = turned.d * raw_x + turned.e * raw_y + turned.f
+            assert abs((479 - ox) - nx) < 1e-6 and abs((319 - oy) - ny) < 1e-6
 
 
 def test_boot_screens_off_in_the_calibrated_image():
