@@ -951,6 +951,95 @@ def test_io_test_screen_touch():
 
 
 
+def test_battery_icon():
+    """ v5: battery icon in the top nav from the INA219 reading (UPS HAT (C)) """
+    import time as _time
+    from seedsigner.gui.components import GUIConstants, TopNav
+    from seedsigner.gui.screens.screen import ButtonOption, MainMenuScreen
+    from seedsigner.hardware.ina219 import BatteryReading
+    from seedsigner.hardware.power import BatteryMonitor
+    renderer = Renderer.get_instance()
+    monitor = BatteryMonitor.get_instance()
+    saved = (monitor.reading, monitor.reading_time, list(monitor.recent))
+
+    def icon_pixels(box):
+        return renderer.canvas.crop(box).getcolors(10000) or []
+
+    def colors_in(box):
+        return {c for _, c in icon_pixels(box)}
+
+    try:
+        green = tuple(int(GUIConstants.SUCCESS_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+        red = tuple(int(GUIConstants.ERROR_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+
+        monitor.reading, monitor.reading_time = None, 0
+        screen = _menu(show_back_button=True)
+        with renderer.lock:
+            screen._render()
+        check(green not in colors_in((420, 0, 480, 48)) and red not in colors_in((420, 0, 480, 48)),
+              "no reading: no battery icon (screens unchanged)")
+
+        monitor.reading, monitor.reading_time = BatteryReading(3.95, -420, 80), _time.time()
+        screen = _menu(show_back_button=True)
+        with renderer.lock:
+            screen._render()
+        check(green in colors_in((440, 10, 475, 38)), "80%: green battery icon at the top right")
+        screenshot("max_battery_icon_menu.png")
+
+        home = MainMenuScreen(button_data=[ButtonOption(t) for t in ("Scan", "Seeds", "Tools", "Settings")])
+        with renderer.lock:
+            home._render()
+        power_x = home.top_nav.right_button.screen_x
+        check(green in colors_in((power_x - 40, 10, power_x - 2, 38)) and green not in colors_in((power_x, 0, 480, 48)),
+              "home screen: the icon sits left of the power button")
+        screenshot("max_battery_icon_home.png")
+
+        monitor.reading = BatteryReading(3.45, -420, 4)
+        screen = _menu(show_back_button=True)
+        with renderer.lock:
+            screen._render()
+        check(red in colors_in((440, 10, 475, 38)), "4%: red battery icon")
+
+        monitor.reading = BatteryReading(4.12, 350, 96)
+        screen = _menu(show_back_button=True)
+        with renderer.lock:
+            screen._render()
+        white = tuple(int(GUIConstants.BODY_FONT_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+        check(white in colors_in((448, 12, 468, 36)), "on the USB cable: lightning bolt on the icon")
+        screenshot("max_battery_icon_charging.png")
+
+        nav = TopNav(text="A very long screen title that fills the bar", show_back_button=True)
+        check(nav.battery_layout("80%") == (None, 443), f"a long title: icon only, percentage dropped: {nav.battery_layout('80%')}")
+        nav = TopNav(text="An even longer screen title that fills the bar", show_back_button=True)
+        check(nav.battery_layout("80%") is None or nav.title.needs_scroll, "a title reaching the corner: no icon at all")
+        nav = TopNav(text="Settings", show_back_button=True)
+        layout = nav.battery_layout("80%")
+        check(layout is not None and layout[0] is not None, f"a short title leaves room for icon and percentage: {layout}")
+    finally:
+        monitor.reading, monitor.reading_time, monitor.recent = saved
+
+
+def test_display_speed_setting():
+    """ Settings > Advanced > Hardware > Display speed sets the pixel clock, live """
+    import spidev
+    from seedsigner.hardware.displays.display_driver import DisplayDriverFactory, DISPLAY_TYPE__ILI9486
+    from seedsigner.models.settings import Settings
+    spi = MagicMock()
+    spidev.SpiDev = MagicMock(return_value=spi)
+    disp = DisplayDriverFactory.instantiate_display_driver(DISPLAY_TYPE__ILI9486, width=480, height=320)
+    settings = Settings.get_instance()
+    try:
+        disp.show_image(Image.new("RGB", (480, 320)))
+        check(spi.max_speed_hz == 16_000_000, "default pixel clock 16 MHz")
+        settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 32)
+        disp.show_image(Image.new("RGB", (480, 320)))
+        check(spi.max_speed_hz == 32_000_000, "Display speed 32 MHz applies on the next frame")
+        check(all(c.args[1] == 10_000_000 for c in spi.xfer2.call_args_list), "commands stay at 10 MHz")
+    finally:
+        settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 16)
+
+
+
 if __name__ == "__main__":
     TestRenderer.configure_instance()
     test_st7796_driver()
@@ -975,6 +1064,8 @@ if __name__ == "__main__":
     test_touch_raw_test_screen()
     test_power_pins()
     test_io_test_screen_touch()
+    test_battery_icon()
+    test_display_speed_setting()
 
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

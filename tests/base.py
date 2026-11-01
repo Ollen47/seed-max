@@ -52,6 +52,8 @@ class BaseTest:
         from seedsigner.hardware import hw_profile
         hw_profile.TOUCH_CALIBRATE_AT_BOOT = False
         hw_profile.TOUCH_RAW_TEST_AT_BOOT = False
+        # No battery thread reading a mocked GPIO (tested on its own in test_seedsigner_max_battery.py)
+        hw_profile.BATTERY_GAUGE_INA219 = False
 
         # Instantiate the mocked MicroSD; hold on to the instance so tests can manipulate
         # it later.

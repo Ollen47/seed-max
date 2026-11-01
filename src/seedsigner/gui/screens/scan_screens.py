@@ -52,8 +52,15 @@ class ScanScreen(BaseScreen):
 
     def __post_init__(self):
         from seedsigner.hardware.camera import Camera
+        from seedsigner.hardware import hw_profile
         # Initialize the base class
         super().__post_init__()
+
+        # SeedSigner Max: capture size from Settings > Advanced > Hardware (tuning)
+        if hw_profile.is_max_profile():
+            from seedsigner.models.settings import Settings, SettingsConstants
+            size = int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_RESOLUTION) or hw_profile.CAMERA_RESOLUTION)
+            self.resolution = (size, size)
 
         # TODO: Arrange this with UI elements rather than text
         self.instructions_text = "< " + _("back") + "  |  " + _(self.instructions_text)
@@ -70,6 +77,7 @@ class ScanScreen(BaseScreen):
             render_rect=self.render_rect,
             frame_decode_status=self.frames_decode_status,
         ))
+        self.threads[-1].capture_size = self.resolution[0]
 
 
     class LivePreviewThread(BaseThread):
@@ -88,12 +96,20 @@ class ScanScreen(BaseScreen):
             self.render_width = self.render_rect[2] - self.render_rect[0]
             self.render_height = self.render_rect[3] - self.render_rect[1]
             self.decoder_fps = "0.0"
+            self.capture_size = 480
 
             super().__init__()
 
 
         def run(self):
+            from seedsigner.hardware import hw_profile
             instructions_font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.get_button_font_size())
+
+            # SeedSigner Max: RGB frames (faster to display), optional frame-rate overlay
+            is_max = hw_profile.is_max_profile()
+            show_fps = is_max and hw_profile.CAMERA_FPS_OVERLAY
+            fps_font = Fonts.get_font(GUIConstants.FIXED_WIDTH_FONT_NAME, 14) if show_fps else None
+            preview_times = []
 
             # pre-calculate how big the animated QR percent display can be
             (left, top, right, bottom) = instructions_font.getbbox("100%")
@@ -101,9 +117,11 @@ class ScanScreen(BaseScreen):
 
             num_frames = 0
             while self.keep_running:
-                frame = self.camera.read_video_stream(as_image=True)
+                frame = self.camera.read_video_stream(as_image=True, rgb=is_max)
                 if frame is not None:
                     num_frames += 1
+                    if show_fps:
+                        preview_times = (preview_times + [time.time()])[-10:]
                     
                     scan_text = None
                     progress_percentage = self.decoder.get_percent_complete()
@@ -216,10 +234,25 @@ class ScanScreen(BaseScreen):
                                     width=1,
                                 )
 
+                        if show_fps:
+                            preview_fps = 0.0
+                            if len(preview_times) > 1:
+                                preview_fps = (len(preview_times) - 1) / max(preview_times[-1] - preview_times[0], 0.001)
+                            ImageDraw.Draw(frame).text(
+                                (GUIConstants.EDGE_PADDING, GUIConstants.EDGE_PADDING),
+                                self.fps_text(preview_fps, self.decoder_fps, self.capture_size),
+                                fill="white", font=fps_font, stroke_width=1, stroke_fill="black")
+
                         self.renderer.show_image(frame, show_direct=True)
 
                 if self.camera._video_stream is None:
                     break
+
+
+        @staticmethod
+        def fps_text(preview_fps: float, decoder_fps: str, capture_size: int) -> str:
+            """ SeedSigner Max: the frame-rate overlay """
+            return f"preview {preview_fps:4.1f} fps  decode {decoder_fps} fps  {capture_size}px"
 
 
     def handle_touch(self, event):

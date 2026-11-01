@@ -12,8 +12,9 @@ SeedSigner Max (v4): battery and power switch on the carrier PCB.
 All of this is read-only information or a one-way "off" switch: nothing here can send
 data anywhere.
 
-v5 has no carrier (hw_profile.HAS_CARRIER = False): every function here is then a no-op
-and the battery monitor never starts, so these pins are left alone.
+v5 has no carrier (hw_profile.HAS_CARRIER = False): every function above is then a
+no-op, so these pins are left alone. The v5 battery level comes from the UPS HAT (C)'s
+INA219 instead (hardware/ina219.py), read by the same BatteryMonitor thread.
 """
 import logging
 import time
@@ -75,14 +76,26 @@ def power_off():
 
 class BatteryMonitor(Singleton, BaseThread):
     """
-    Background thread: shows a "Battery low" warning toast when the comparator trips,
-    and again every REMIND_EVERY_S while it stays low. A reading only counts after
+    Background thread for the battery.
+
+    v4 carrier: shows a "Battery low" warning toast when the comparator trips, and again
+    every REMIND_EVERY_S while it stays low. A reading only counts after
     CONFIRM_READINGS identical ones in a row, so the voltage dip of a camera start-up
     doesn't raise a false alarm.
+
+    v5 (UPS HAT (C)): reads the INA219 every CHECK_EVERY_S and keeps `reading`, the
+    median of the last READINGS_KEPT good readings (a BatteryReading, or None while
+    there is none), for the battery icon in the top nav. "Battery low" below
+    hw_profile.BATTERY_LOW_PERCENT every REMIND_EVERY_S, "Battery almost empty" below
+    BATTERY_CRITICAL_PERCENT every CRITICAL_REMIND_S; never while a USB cable powers it.
     """
     CHECK_EVERY_S = 5
     CONFIRM_READINGS = 3
     REMIND_EVERY_S = 5 * 60
+    CRITICAL_REMIND_S = 60
+    READINGS_KEPT = 3
+    STALE_AFTER_S = 60              # no good reading for this long: hide the icon
+    GIVE_UP_AFTER = 6               # INA219 not found this many times in a row: stop
 
     @classmethod
     def get_instance(cls):
@@ -91,15 +104,61 @@ class BatteryMonitor(Singleton, BaseThread):
             cls._instance = monitor
             BaseThread.__init__(monitor)
             monitor.is_low = False
+            monitor.recent = []
+            monitor.reading = None
+            monitor.reading_time = 0
+            monitor.gauge = None
         return cls._instance
 
 
     def start_monitoring(self):
-        if hw_profile.has_carrier() and _gpio() is not None:
+        if getattr(self, "_monitoring", False):
+            # Once per boot (a thread can only be started once)
+            return
+        if (hw_profile.has_carrier() or hw_profile.has_battery_gauge()) and _gpio() is not None:
+            self._monitoring = True
             self.start()
 
 
-    def run(self):
+    @property
+    def current(self):
+        """ The latest (filtered) BatteryReading, or None if there is no fresh one """
+        if self.reading is None or time.time() - self.reading_time > self.STALE_AFTER_S:
+            return None
+        return self.reading
+
+
+    def add_reading(self, reading, now: float = None):
+        """ Keep the median (by voltage) of the last READINGS_KEPT good readings """
+        if reading is None:
+            return
+        self.recent = (self.recent + [reading])[-self.READINGS_KEPT:]
+        ordered = sorted(self.recent, key=lambda r: r.voltage)
+        self.reading = ordered[len(ordered) // 2]
+        self.reading_time = time.time() if now is None else now
+
+
+    def warning_due(self, now: float, last_warning: float | None, last_level: str | None):
+        """
+        (toast text or None, level) for the current reading: "critical", "low" or None.
+        A level change warns at once; the same level again after its reminder interval.
+        """
+        from gettext import gettext as _
+        reading = self.current
+        if reading is None or reading.on_external_power:
+            return None, None
+        if reading.percent <= hw_profile.BATTERY_CRITICAL_PERCENT:
+            level, text, every = "critical", _("Battery almost empty ({}%)").format(reading.percent), self.CRITICAL_REMIND_S
+        elif reading.percent <= hw_profile.BATTERY_LOW_PERCENT:
+            level, text, every = "low", _("Battery low ({}%)").format(reading.percent), self.REMIND_EVERY_S
+        else:
+            return None, None
+        if level != last_level or last_warning is None or now - last_warning >= every:
+            return text, level
+        return None, level
+
+
+    def _run_carrier(self):
         from seedsigner.controller import Controller
         from seedsigner.gui.toast import WarningToast
         from gettext import gettext as _
@@ -125,3 +184,42 @@ class BatteryMonitor(Singleton, BaseThread):
                 logger.exception(f"Battery monitor: {e}")
 
             time.sleep(self.CHECK_EVERY_S)
+
+
+    def _run_gauge(self):
+        from seedsigner.controller import Controller
+        from seedsigner.gui.toast import WarningToast
+        from seedsigner.hardware.ina219 import INA219Gauge
+
+        if self.gauge is None:
+            self.gauge = INA219Gauge()
+        not_found = 0
+        last_warning = None
+        last_level = None
+        while self.keep_running:
+            try:
+                if self.gauge.address is None and self.gauge.find() is None:
+                    not_found += 1
+                    if not_found >= self.GIVE_UP_AFTER:
+                        logger.info("INA219 not found: no battery level")
+                        return
+                else:
+                    self.add_reading(self.gauge.read())
+                    now = time.time()
+                    text, level = self.warning_due(now, last_warning, last_level)
+                    self.is_low = level is not None
+                    if text:
+                        last_warning = now
+                        Controller.get_instance().activate_toast(WarningToast(text, duration=5))
+                    last_level = level
+            except Exception as e:
+                logger.exception(f"Battery monitor: {e}")
+
+            time.sleep(self.CHECK_EVERY_S)
+
+
+    def run(self):
+        if hw_profile.has_carrier():
+            self._run_carrier()
+        elif hw_profile.has_battery_gauge():
+            self._run_gauge()

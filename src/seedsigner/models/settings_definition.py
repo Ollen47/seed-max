@@ -231,6 +231,19 @@ class SettingsConstants:
     CAMERA_ROTATION__90 = 90
     CAMERA_ROTATION__180 = 180
     CAMERA_ROTATION__270 = 270
+    # SeedSigner Max: camera capture size for the QR scanner (square frames)
+    ALL_MAX_CAMERA_RESOLUTIONS = [
+        (480, "480 x 480"),
+        (400, "400 x 400"),
+        (320, "320 x 320"),
+    ]
+    # SeedSigner Max: SPI clock for the display's pixel data
+    ALL_MAX_DISPLAY_SPI_MHZ = [
+        (16, "16 MHz"),
+        (24, "24 MHz"),
+        (32, "32 MHz"),
+    ]
+
     ALL_CAMERA_ROTATIONS = [
         (CAMERA_ROTATION__0, _mft("0°")),
         (CAMERA_ROTATION__90, _mft("90°")),
@@ -345,6 +358,8 @@ class SettingsConstants:
     SETTING__XPUB_DETAILS = "xpub_details"
     SETTING__PASSPHRASE = "passphrase"
     SETTING__SCRAMBLED_KEYBOARD = "scrambled_keyboard"   # SeedSigner Max
+    SETTING__MAX_CAMERA_RESOLUTION = "max_camera_resolution"   # SeedSigner Max (tuning)
+    SETTING__MAX_DISPLAY_SPI_MHZ = "max_display_spi_mhz"       # SeedSigner Max (tuning)
     SETTING__CAMERA_ROTATION = "camera_rotation"
     SETTING__COMPACT_SEEDQR = "compact_seedqr"
     SETTING__BIP85_CHILD_SEEDS = "bip85_child_seeds"
@@ -749,6 +764,28 @@ class SettingsDefinition:
                       selection_options=SettingsConstants.ALL_DISPLAY_CONFIGURATIONS,
                       # The hardware profile is baked into the image at build time (see hw_profile.py)
                       default_value=hw_profile.DISPLAY_CONFIGURATION if hw_profile.is_max_profile() else SettingsConstants.DISPLAY_CONFIGURATION__ST7789__240x240),
+
+        # SeedSigner Max: camera and display tuning, to be measured on the device (the
+        # scan screen shows the preview and decoder frame rates, see hw_profile). Not
+        # persistent unless Persistent Settings is on: every boot starts from these
+        # defaults, so a display speed the panel can't take is undone by a restart.
+        SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
+                      attr_name=SettingsConstants.SETTING__MAX_CAMERA_RESOLUTION,
+                      abbreviated_name="max_cam_res",
+                      display_name=_mft("Camera resolution"),
+                      type=SettingsConstants.TYPE__SELECT_1,
+                      visibility=SettingsConstants.VISIBILITY__HARDWARE if hw_profile.is_max_profile() else SettingsConstants.VISIBILITY__HIDDEN,
+                      selection_options=SettingsConstants.ALL_MAX_CAMERA_RESOLUTIONS,
+                      default_value=hw_profile.CAMERA_RESOLUTION),
+
+        SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
+                      attr_name=SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ,
+                      abbreviated_name="max_disp_spi",
+                      display_name=_mft("Display speed"),
+                      type=SettingsConstants.TYPE__SELECT_1,
+                      visibility=SettingsConstants.VISIBILITY__HARDWARE if hw_profile.is_max_profile() else SettingsConstants.VISIBILITY__HIDDEN,
+                      selection_options=SettingsConstants.ALL_MAX_DISPLAY_SPI_MHZ,
+                      default_value=hw_profile.ILI9486_SPI_SPEED_HZ // 1_000_000),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
                       attr_name=SettingsConstants.SETTING__DISPLAY_COLOR_INVERTED,

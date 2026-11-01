@@ -41,7 +41,12 @@ class Camera(Singleton):
             raise CameraConnectionError()
 
 
-    def read_video_stream(self, as_image=False):
+    def read_video_stream(self, as_image=False, rgb=False):
+        """
+        `rgb` (SeedSigner Max, live preview): return the frame as an RGB image instead of
+        RGBA. Same pixels, same rotation, but the display driver converts RGB straight to
+        RGB565 while RGBA takes a much slower path on every frame.
+        """
         if not self._video_stream:
             raise Exception("Must call start_video_stream first.")
         frame = self._video_stream.read()
@@ -49,7 +54,10 @@ class Camera(Singleton):
             return frame
         else:
             if frame is not None:
-                return Image.fromarray(frame.astype('uint8'), 'RGB').convert('RGBA').rotate(90 + self._camera_rotation)
+                image = Image.fromarray(frame.astype('uint8'), 'RGB')
+                if not rgb:
+                    image = image.convert('RGBA')
+                return image.rotate(90 + self._camera_rotation)
         return None
 
 

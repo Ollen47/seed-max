@@ -146,10 +146,27 @@ TOUCH_RAW_TEST_AT_BOOT = False
 # Power
 # ---------------------------------------------------------------------------------------
 # v5 has no carrier PCB: the Waveshare UPS HAT (C) handles charging and the on/off
-# switch by itself and SeedSigner reads nothing from it (its INA219 sits on I2C, which
-# SeedSigner never uses: no I2C driver, no extra code path).
-# True only for the v4 carrier PCB, whose pins follow.
+# switch by itself. True only for the v4 carrier PCB, whose pins follow.
 HAS_CARRIER = False
+
+# v5 battery gauge: the INA219 of the UPS HAT (C), read-only, through I2C done by the
+# app itself on two GPIOs (hardware/ina219.py): SeedSigner OS has no I2C driver and
+# isn't changed. Pins 3 (SDA, BCM 2) and 5 (SCL, BCM 3) reach the HAT through its pogo
+# pins; the 3.5" (A) display doesn't use them. False = no battery icon, nothing read.
+BATTERY_GAUGE_INA219 = True
+BATTERY_I2C_SDA_PIN = 3
+BATTERY_I2C_SCL_PIN = 5
+# Waveshare's sample code for the UPS HAT (C) uses 0x43; the rest are the INA219's other
+# common straps, tried in this order until one answers.
+BATTERY_INA219_ADDRESSES = (0x43, 0x42, 0x41, 0x40)
+BATTERY_SHUNT_OHM = 0.1              # Waveshare FAQ: 0.1 ohm sense resistor
+# Voltage drop of the loaded cell, added back before estimating the charge left
+BATTERY_INTERNAL_OHM = 0.15
+# Above this current (mA) the cell isn't feeding the Pi: a USB cable powers the HAT
+BATTERY_EXTERNAL_POWER_MA = -60
+# Warnings, on the estimated charge left
+BATTERY_LOW_PERCENT = 15             # "Battery low" toast, repeated every 5 minutes
+BATTERY_CRITICAL_PERCENT = 5         # "Battery almost empty" toast, every minute
 
 # Battery-low comparator (LM393 + TLV431, ~3.44 V on the cell): LOW = battery low
 PIN_BATT_LOW = 15                    # BCM 22, 47 kOhm pull-up to 3V3 on the carrier
@@ -171,8 +188,26 @@ PIN_CHG_PG = 32                      # BCM 12, 47 kOhm pull-up to 3V3 on the car
 TOUCH_BUTTON_HEIGHT = 40
 
 
+# ---------------------------------------------------------------------------------------
+# Camera preview (tuning on the device)
+# ---------------------------------------------------------------------------------------
+# Live preview: frames per second of the preview and of the QR decoder, top left of the
+# scan screen. For measuring; set to False in the final image.
+CAMERA_FPS_OVERLAY = True
+
+# Square camera frames for the QR scanner, one of 480, 400, 320 (stock SeedSigner: 480).
+# Fewer pixels = less work per frame for the Pi Zero's single core (rotation, scaling,
+# decoding). Selectable at runtime in Settings > Advanced > Hardware to compare.
+CAMERA_RESOLUTION = 480
+
+
 def is_max_profile() -> bool:
     return ACTIVE_PROFILE == PROFILE__MAX
+
+
+def has_battery_gauge() -> bool:
+    """ v5: the UPS HAT (C)'s INA219 """
+    return is_max_profile() and not HAS_CARRIER and BATTERY_GAUGE_INA219
 
 
 def has_carrier() -> bool:

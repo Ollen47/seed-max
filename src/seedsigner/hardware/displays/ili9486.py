@@ -170,6 +170,9 @@ class ILI9486(BaseDisplayDriver):
         has to keep word alignment across a CS toggle in the middle of pixel data.
         Any partial update must go through here as well.
         """
+        # Pixel clock from Settings > Advanced > Hardware > Display speed (tuning; the
+        # commands keep their own 10 MHz cap)
+        self._spi.max_speed_hz = self.pixel_speed_hz()
         row_bytes = width * 2
         rows_per_band = max(1, min(FRAME_BAND_ROWS, min(SPIDEV_BUFSIZ, MAX_PIXEL_TRANSFER) // row_bytes))
         for band_y in range(0, height, rows_per_band):
@@ -177,6 +180,19 @@ class ILI9486(BaseDisplayDriver):
             self._set_window(x0, y0 + band_y, x0 + width - 1, y0 + band_y + band_rows - 1)
             GPIO.output(self._dc, GPIO.HIGH)
             self._spi.writebytes2(pixels[band_y * row_bytes:(band_y + band_rows) * row_bytes])
+
+
+    @staticmethod
+    def pixel_speed_hz() -> int:
+        """ The pixel SPI clock: the Display speed setting, or hw_profile's default """
+        try:
+            from seedsigner.models.settings import Settings, SettingsConstants
+            mhz = Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ)
+            if mhz:
+                return int(mhz) * 1_000_000
+        except Exception:
+            pass
+        return hw_profile.ILI9486_SPI_SPEED_HZ
 
 
     def cleanup(self):

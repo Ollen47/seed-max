@@ -1771,6 +1771,7 @@ class TopNav(BaseComponent):
     def render(self):
         self.title.render()
         self.render_buttons()
+        self.render_battery()
     
 
     def render_buttons(self):
@@ -1780,6 +1781,76 @@ class TopNav(BaseComponent):
         if self.show_power_button:
             self.right_button.is_selected = self.is_selected
             self.right_button.render()
+
+
+    # SeedSigner Max v5: battery icon at the right of the top nav (UPS HAT (C) INA219)
+    BATTERY_ICON_SIZE = (26, 13)
+
+    def battery_layout(self, percent_text: str):
+        """
+        (text_x, icon_x) for the battery icon and its percentage, or None if it would
+        touch the title. Right-aligned, left of the power button when there is one; the
+        percentage is dropped first if room is short.
+        """
+        right = self.width - GUIConstants.EDGE_PADDING
+        if self.show_power_button:
+            right = self.right_button.screen_x - GUIConstants.COMPONENT_PADDING
+        icon_w = self.BATTERY_ICON_SIZE[0] + 3          # body + nub
+        icon_x = right - icon_w
+        font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.LABEL_FONT_SIZE)
+        text_w = int(font.getlength(percent_text))
+        title_font = Fonts.get_font(self.font_name, self.font_size)
+        title_right = int(self.width / 2 + title_font.getlength(self.text) / 2)
+        if self.icon_name:
+            title_right += GUIConstants.ICON_FONT_SIZE + 4 + GUIConstants.COMPONENT_PADDING
+        text_x = icon_x - 4 - text_w
+        if title_right + 6 <= text_x:
+            return (text_x, icon_x)
+        if title_right + 6 <= icon_x:
+            return (None, icon_x)
+        return None
+
+
+    def render_battery(self):
+        if not hw_profile.is_max_profile() or getattr(self.title, "needs_scroll", False):
+            return
+        from seedsigner.hardware.power import BatteryMonitor
+        reading = BatteryMonitor.get_instance().current
+        if reading is None:
+            return
+
+        percent_text = f"{reading.percent}%"
+        layout = self.battery_layout(percent_text)
+        if layout is None:
+            return
+        text_x, icon_x = layout
+        w, h = self.BATTERY_ICON_SIZE
+        y = int((self.height - h) / 2)
+        draw = self.image_draw
+        outline = GUIConstants.BODY_FONT_COLOR
+        if reading.percent > 30:
+            fill = GUIConstants.SUCCESS_COLOR
+        elif reading.percent > 15:
+            fill = GUIConstants.WARNING_COLOR
+        else:
+            fill = GUIConstants.ERROR_COLOR
+
+        # Body, nub, charge level
+        draw.rectangle((icon_x, y, icon_x + w - 1, y + h - 1), outline=outline, fill=GUIConstants.BACKGROUND_COLOR, width=1)
+        draw.rectangle((icon_x + w, y + 3, icon_x + w + 2, y + h - 4), fill=outline)
+        inner_w = w - 4
+        level_w = max(1, int(round(inner_w * reading.percent / 100)))
+        draw.rectangle((icon_x + 2, y + 2, icon_x + 1 + level_w, y + h - 3), fill=fill)
+
+        if reading.on_external_power:
+            # Lightning bolt across the body: a USB cable powers the device
+            cx = icon_x + int(w / 2)
+            bolt = [(cx + 2, y - 1), (cx - 4, y + 7), (cx, y + 7), (cx - 2, y + h), (cx + 4, y + 5), (cx, y + 5)]
+            draw.polygon(bolt, fill=GUIConstants.BODY_FONT_COLOR, outline=GUIConstants.BACKGROUND_COLOR)
+
+        if text_x is not None:
+            font = Fonts.get_font(GUIConstants.get_body_font_name(), GUIConstants.LABEL_FONT_SIZE)
+            draw.text((text_x, int(self.height / 2)), percent_text, fill=GUIConstants.LABEL_FONT_COLOR, font=font, anchor="lm")
 
 
 
