@@ -58,12 +58,13 @@ ILI9486_PIN_RST = 22  # BCM 25
 # because of how the panel sits in your enclosure, then recalibrate the touch screen.
 ILI9486_MADCTL = 0xE8
 
-# SPI clock. The converter, not the ILI9486, sets the limit: 16 MHz is a conservative
-# starting point, to be confirmed on the real board. Try 24_000_000 or 32_000_000 for
-# faster screen updates; go back down if the image shows noise, wrong colors or shifted
-# lines. (The Pi Zero divides its core clock by an even number: the real clock is the
-# nearest value at or below the one asked for.)
-ILI9486_SPI_SPEED_HZ = 16_000_000
+# SPI clock for the pixel data (commands stay at 10 MHz). The converter, not the
+# ILI9486, sets the limit. Measured on this board (1 Nov 2026, 320 px camera preview):
+# 16 MHz 2.7 fps, 24 MHz 3.2 fps, 32 MHz 3.4 fps, clean image at all three. 24 MHz: most
+# of the gain, with margin below the converter's limit. Settings > Advanced > Hardware >
+# Display speed changes it until the next restart. (The Pi Zero divides its core clock
+# by an even number: the real clock is the nearest value at or below the one asked.)
+ILI9486_SPI_SPEED_HZ = 24_000_000
 
 
 # ---------------------------------------------------------------------------------------
@@ -192,13 +193,19 @@ TOUCH_BUTTON_HEIGHT = 40
 # Camera preview (tuning on the device)
 # ---------------------------------------------------------------------------------------
 # Live preview: frames per second of the preview and of the QR decoder, top left of the
-# scan screen. For measuring; set to False in the final image.
-CAMERA_FPS_OVERLAY = True
+# scan screen. For measuring only: off in the final image.
+CAMERA_FPS_OVERLAY = False
 
 # Square camera frames for the QR scanner, one of 480, 400, 320 (stock SeedSigner: 480).
 # Fewer pixels = less work per frame for the Pi Zero's single core (rotation, scaling,
-# decoding). Selectable at runtime in Settings > Advanced > Hardware to compare.
-CAMERA_RESOLUTION = 480
+# decoding). Measured on this board (1 Nov 2026), decoder / preview fps: 480 px 5.1 / 2.3,
+# 400 px 7.3 / 2.5, 320 px 9.4 / 2.7; a SeedQR is read at once at 320 px.
+# Settings > Advanced > Hardware > Camera resolution changes it until the next restart.
+CAMERA_RESOLUTION = 320
+
+# Camera rotation default (0, 90, 180, 270; stock SeedSigner: 180). The camera sits
+# under the display's right overhang, its flex cable folded once at 45 degrees: 90.
+CAMERA_ROTATION = 90
 
 
 def is_max_profile() -> bool:

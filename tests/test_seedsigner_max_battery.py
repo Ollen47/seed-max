@@ -383,5 +383,16 @@ def test_tuning_settings():
     res = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__MAX_CAMERA_RESOLUTION)
     spi = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ)
     assert [v for v, _ in res.selection_options] == [480, 400, 320] and res.default_value == hw_profile.CAMERA_RESOLUTION
-    assert [v for v, _ in spi.selection_options] == [16, 24, 32] and spi.default_value == 16
+    assert [v for v, _ in spi.selection_options] == [16, 24, 32] and spi.default_value == 24
     assert res.visibility == SettingsConstants.VISIBILITY__HARDWARE == spi.visibility
+
+
+def test_final_camera_and_display_values():
+    """ Values measured on the device (1 Nov 2026) """
+    from seedsigner.models.settings_definition import SettingsConstants, SettingsDefinition
+    assert hw_profile.CAMERA_RESOLUTION == 320
+    assert hw_profile.ILI9486_SPI_SPEED_HZ == 24_000_000
+    assert hw_profile.CAMERA_FPS_OVERLAY is False
+    rotation = SettingsDefinition.get_settings_entry(SettingsConstants.SETTING__CAMERA_ROTATION)
+    assert rotation.default_value == 90 == hw_profile.CAMERA_ROTATION
+    assert rotation.default_value in [v for v, _ in rotation.selection_options]

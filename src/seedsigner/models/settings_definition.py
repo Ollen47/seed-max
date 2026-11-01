@@ -688,7 +688,8 @@ class SettingsDefinition:
                       type=SettingsConstants.TYPE__SELECT_1,
                       visibility=SettingsConstants.VISIBILITY__ADVANCED,
                       selection_options=SettingsConstants.ALL_CAMERA_ROTATIONS,
-                      default_value=SettingsConstants.CAMERA_ROTATION__180),
+                      # SeedSigner Max: the camera's mounting is fixed by the build (hw_profile)
+                      default_value=hw_profile.CAMERA_ROTATION if hw_profile.is_max_profile() else SettingsConstants.CAMERA_ROTATION__180),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__FEATURES,
                       attr_name=SettingsConstants.SETTING__COMPACT_SEEDQR,

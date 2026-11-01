@@ -199,7 +199,7 @@ def test_ili9486_driver():
     GPIO.output = lambda pin, value: log.append(("pin", pin, value))
     disp = DisplayDriverFactory.instantiate_display_driver(DISPLAY_TYPE__ILI9486, width=480, height=320)
     check(spidev.SpiDev.call_args.args == (0, 0), "ILI9486 on SPI0 CE0")
-    check(spi.max_speed_hz == 16_000_000, "ILI9486 SPI clock 16 MHz (conservative default)")
+    check(spi.max_speed_hz == 24_000_000, "ILI9486 pixel clock 24 MHz (measured on the board)")
     check((disp.width, disp.height) == (480, 320), "ILI9486 exposes a 480x320 landscape surface")
     pins = sorted(c.args[0] for c in GPIO.setup.call_args_list)
     check(pins == [18, 22], f"only RS (pin 18) and RST (pin 22) are driven, no backlight pin: {pins}")
@@ -1030,13 +1030,13 @@ def test_display_speed_setting():
     settings = Settings.get_instance()
     try:
         disp.show_image(Image.new("RGB", (480, 320)))
-        check(spi.max_speed_hz == 16_000_000, "default pixel clock 16 MHz")
+        check(spi.max_speed_hz == 24_000_000, "default pixel clock 24 MHz")
         settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 32)
         disp.show_image(Image.new("RGB", (480, 320)))
         check(spi.max_speed_hz == 32_000_000, "Display speed 32 MHz applies on the next frame")
         check(all(c.args[1] == 10_000_000 for c in spi.xfer2.call_args_list), "commands stay at 10 MHz")
     finally:
-        settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 16)
+        settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 24)
 
 
 
