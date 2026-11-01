@@ -111,6 +111,7 @@ class BatteryMonitor(Singleton, BaseThread):
             monitor.gauge = None
             monitor.fast = False
             monitor.latest = None          # last good reading, unfiltered
+            monitor.last_battery_percent = None   # last estimate made on battery (off the cable)
         return cls._instance
 
 
@@ -146,6 +147,33 @@ class BatteryMonitor(Singleton, BaseThread):
         ordered = sorted(self.recent, key=lambda r: r.voltage)
         self.reading = ordered[len(ordered) // 2]
         self.reading_time = time.time() if now is None else now
+        if not self.reading.on_external_power:
+            self.last_battery_percent = self.reading.percent
+
+
+    def shown_percent(self) -> int | None:
+        """
+        The percentage to show: the estimate on battery; nothing while the charger fills
+        the cell (its voltage reads high whatever the charge); 100 once charged.
+        """
+        reading = self.current
+        if reading is None:
+            return None
+        if not reading.on_external_power:
+            return reading.percent
+        return None if reading.charging else 100
+
+
+    def fill_percent(self) -> int | None:
+        """ How full to draw the icon: as shown, or while charging the last on-battery estimate """
+        reading = self.current
+        if reading is None:
+            return None
+        shown = self.shown_percent()
+        if shown is not None:
+            return shown
+        last = getattr(self, "last_battery_percent", None)
+        return last if last is not None else reading.percent
 
 
     def warning_due(self, now: float, last_warning: float | None, last_level: str | None):

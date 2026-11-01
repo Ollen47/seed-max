@@ -160,7 +160,9 @@ def raw_bus(volts):
     return (int(round(volts / 0.004)) << 3) | 0b10       # CNVR set, as the chip does
 
 
-def raw_shunt(current_ma, shunt_ohm=0.1):
+def raw_shunt(current_ma, shunt_ohm=None):
+    if shunt_ohm is None:
+        shunt_ohm = hw_profile.BATTERY_SHUNT_OHM
     raw = int(round(current_ma / 1000 * shunt_ohm / 10e-6))
     return raw & 0xFFFF
 
@@ -172,8 +174,8 @@ def raw_shunt(current_ma, shunt_ohm=0.1):
 def test_decode_registers():
     assert decode_bus_voltage(raw_bus(3.848)) == pytest.approx(3.848, abs=0.002)
     assert decode_bus_voltage(0xFFFF) == pytest.approx(8191 * 0.004)
-    assert decode_shunt_mv(raw_shunt(-400)) == pytest.approx(-40.0)
-    assert decode_shunt_mv(raw_shunt(250)) == pytest.approx(25.0)
+    assert decode_shunt_mv(raw_shunt(-400, 0.1)) == pytest.approx(-40.0)
+    assert decode_shunt_mv(raw_shunt(250, 0.1)) == pytest.approx(25.0)
     assert decode_shunt_mv(0x8000) == pytest.approx(-327.68)
 
 
@@ -264,6 +266,7 @@ def monitor():
     from seedsigner.hardware.power import BatteryMonitor
     m = BatteryMonitor.__new__(BatteryMonitor)
     m.recent, m.reading, m.reading_time, m.is_low, m.gauge = [], None, 0, False, None
+    m.last_battery_percent = None
     return m
 
 
@@ -436,6 +439,46 @@ def test_battery_screen_lines():
         lines = BatteryInfoScreen.lines(None)
         assert lines[:5] == ["INA219 at 0x43", "voltage   3.848 V", "current   -400.0 mA", "cable     no", "estimate  52%"]
         assert lines[5] == "shown     52%"
+        m.add_reading(BatteryReading(4.17, 320.0, 99))
+        lines = BatteryInfoScreen.lines(None)
+        assert lines[3] == "cable     yes (charging)" and lines[5] == "shown     --"
         assert lines[6] == f"raw  bus {raw_bus(3.848):04X}  shunt {raw_shunt(-400):04X}"
     finally:
         m.gauge, m.latest, m.recent, m.reading, m.reading_time = saved
+
+
+
+def test_shunt_from_the_device_readings():
+    """
+    The Battery screen on the device (1 Nov 2026), raw shunt registers: on battery FE3F,
+    charging 0144 and 01B9. With the 0.01 ohm shunt (Waveshare's own calibration) they
+    are -449 mA (Pi + display), +324 and +441 mA (charger): plausible. With 0.1 ohm they
+    were ten times too small and the cell never looked like it fed the Pi.
+    """
+    assert hw_profile.BATTERY_SHUNT_OHM == 0.01
+    on_battery = decode_shunt_mv(0xFE3F) / hw_profile.BATTERY_SHUNT_OHM
+    charging = [decode_shunt_mv(r) / hw_profile.BATTERY_SHUNT_OHM for r in (0x0144, 0x01B9)]
+    assert on_battery == pytest.approx(-449, abs=1)
+    assert charging == [pytest.approx(324, abs=1), pytest.approx(441, abs=1)]
+    assert decode_bus_voltage(0x1EC2) == pytest.approx(3.936, abs=0.001)
+    assert decode_bus_voltage(0x209A) == pytest.approx(4.172, abs=0.001)
+
+    battery = BatteryReading(3.936, on_battery, estimate_percent(3.936, on_battery))
+    assert not battery.on_external_power, "on battery: no bolt"
+    assert 70 <= battery.percent <= 95
+    cable = BatteryReading(4.172, charging[0], estimate_percent(4.172, charging[0]))
+    assert cable.on_external_power and cable.charging and not cable.charged
+
+
+def test_what_the_icon_shows_while_charging():
+    m = monitor()
+    m.add_reading(BatteryReading(3.80, -450, 52))
+    assert (m.shown_percent(), m.fill_percent()) == (52, 52)
+    m.add_reading(BatteryReading(4.17, 320, 99))              # cable in, charging
+    assert m.shown_percent() is None, "no number while the charger fills the cell"
+    assert m.fill_percent() == 52, "the icon keeps the last on-battery level"
+    m.add_reading(BatteryReading(4.19, 40, 100))              # charge complete
+    assert (m.shown_percent(), m.fill_percent()) == (100, 100)
+    m.add_reading(BatteryReading(4.10, -450, 90))             # cable out
+    assert (m.shown_percent(), m.fill_percent()) == (90, 90)
+    assert m.warning_due(0, None, None) == (None, None)

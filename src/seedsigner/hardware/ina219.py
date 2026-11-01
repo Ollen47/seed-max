@@ -2,8 +2,8 @@
 SeedSigner Max v5: battery level from the INA219 on the Waveshare UPS HAT (C).
 
 The INA219 is a fixed-function current/voltage monitor: an ADC and a handful of
-registers, no firmware. On the UPS HAT (C) it measures the LiPo cell through a 0.1 ohm
-shunt and sits on the Pi's I2C pins (header pins 3 = SDA, 5 = SCL), reached through the
+registers, no firmware. On the UPS HAT (C) it measures the LiPo cell through a 0.01 ohm
+shunt (hw_profile.BATTERY_SHUNT_OHM) and sits on the Pi's I2C pins (header pins 3 = SDA, 5 = SCL), reached through the
 HAT's pogo pins. The Waveshare 3.5" (A) display doesn't use those two pins.
 
 SeedSigner OS has no I2C driver (no i2c-bcm2835, no /dev/i2c-*), and this project
@@ -99,6 +99,16 @@ class BatteryReading:
         -300 mA or more) but charging or idle.
         """
         return self.current_ma > hw_profile.BATTERY_EXTERNAL_POWER_MA
+
+    @property
+    def charging(self) -> bool:
+        """ The charger is filling the cell (its voltage then reads high) """
+        return self.current_ma > hw_profile.BATTERY_CHARGE_DONE_MA
+
+    @property
+    def charged(self) -> bool:
+        """ On the cable with the charge complete (the current has tapered off) """
+        return self.on_external_power and not self.charging
 
 
 
@@ -306,7 +316,8 @@ class INA219Gauge:
             return None
         try:
             bus_raw = self._read_twice(REG_BUS_VOLTAGE, tolerance=10 << 3)        # 40 mV
-            shunt_raw = self._read_twice(REG_SHUNT_VOLTAGE, tolerance=3000)      # 30 mV = 300 mA
+            # 300 mA apart at most (in shunt-register units: 10 uV per bit)
+            shunt_raw = self._read_twice(REG_SHUNT_VOLTAGE, tolerance=int(round(0.3 * hw_profile.BATTERY_SHUNT_OHM / 10e-6)))
         except I2CError as e:
             logger.info(f"INA219 read dropped: {e}")
             return None

@@ -812,11 +812,13 @@ class BatteryInfoScreen(BaseTopNavScreen):
         out += [
             f"voltage   {latest.voltage:.3f} V",
             f"current   {latest.current_ma:+.1f} mA",
-            f"cable     {'yes' if latest.on_external_power else 'no'}",
+            f"cable     {'yes' if latest.on_external_power else 'no'}"
+            + (f" ({'charging' if latest.charging else 'charged'})" if latest.on_external_power else ""),
             f"estimate  {latest.percent}%",
         ]
         if shown is not None:
-            out.append(f"shown     {shown.percent}% {'(cable)' if shown.on_external_power else ''}".rstrip())
+            percent = monitor.shown_percent()
+            out.append(f"shown     {'--' if percent is None else f'{percent}%'}")
         if gauge.last_raw:
             bus_raw, shunt_raw = gauge.last_raw
             out.append(f"raw  bus {bus_raw:04X}  shunt {shunt_raw:04X}")

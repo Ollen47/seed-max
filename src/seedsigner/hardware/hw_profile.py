@@ -160,11 +160,20 @@ BATTERY_I2C_SCL_PIN = 5
 # Waveshare's sample code for the UPS HAT (C) uses 0x43; the rest are the INA219's other
 # common straps, tried in this order until one answers.
 BATTERY_INA219_ADDRESSES = (0x43, 0x42, 0x41, 0x40)
-BATTERY_SHUNT_OHM = 0.1              # Waveshare FAQ: 0.1 ohm sense resistor
+# Sense resistor: 0.01 ohm. Waveshare's FAQ says 0.1, but its own sample code calibrates
+# the chip for 0.01 ohm ("16V 5A": calibration 26868 with 0.1524 mA per bit, i.e.
+# 0.04096 / (26868 x 0.0001524 A) = 0.01 ohm), and the device agrees: with 0.1 ohm the
+# Pi + display on battery read -45 mA and charging +32..+44 mA, ten times too little;
+# with 0.01 ohm, -450 mA and +320..+440 mA (Battery screen, 1 Nov 2026).
+BATTERY_SHUNT_OHM = 0.01
 # Voltage drop of the loaded cell, added back before estimating the charge left
 BATTERY_INTERNAL_OHM = 0.15
 # Above this current (mA) the cell isn't feeding the Pi: a USB cable powers the HAT
 BATTERY_EXTERNAL_POWER_MA = -60
+# On the cable, above this charging current (mA) the charger is still filling the cell:
+# its voltage then reads high whatever the charge, so no percentage is shown. Below it,
+# the charge is complete: 100%.
+BATTERY_CHARGE_DONE_MA = 80
 # Warnings, on the estimated charge left
 BATTERY_LOW_PERCENT = 15             # "Battery low" toast, repeated every 5 minutes
 BATTERY_CRITICAL_PERCENT = 5         # "Battery almost empty" toast, every minute

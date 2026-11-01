@@ -1815,22 +1815,28 @@ class TopNav(BaseComponent):
         if not hw_profile.is_max_profile() or getattr(self.title, "needs_scroll", False):
             return
         from seedsigner.hardware.power import BatteryMonitor
-        reading = BatteryMonitor.get_instance().current
+        monitor = BatteryMonitor.get_instance()
+        reading = monitor.current
         if reading is None:
             return
+        shown = monitor.shown_percent()
+        fill_percent = monitor.fill_percent()
 
-        percent_text = f"{reading.percent}%"
+        # No number while charging: the cell's voltage then reads high whatever the charge
+        percent_text = f"{shown}%" if shown is not None else ""
         layout = self.battery_layout(percent_text)
         if layout is None:
             return
         text_x, icon_x = layout
+        if not percent_text:
+            text_x = None
         w, h = self.BATTERY_ICON_SIZE
         y = int((self.height - h) / 2)
         draw = self.image_draw
         outline = GUIConstants.BODY_FONT_COLOR
-        if reading.percent > 30:
+        if fill_percent > 30:
             fill = GUIConstants.SUCCESS_COLOR
-        elif reading.percent > 15:
+        elif fill_percent > 15:
             fill = GUIConstants.WARNING_COLOR
         else:
             fill = GUIConstants.ERROR_COLOR
@@ -1839,7 +1845,7 @@ class TopNav(BaseComponent):
         draw.rectangle((icon_x, y, icon_x + w - 1, y + h - 1), outline=outline, fill=GUIConstants.BACKGROUND_COLOR, width=1)
         draw.rectangle((icon_x + w, y + 3, icon_x + w + 2, y + h - 4), fill=outline)
         inner_w = w - 4
-        level_w = max(1, int(round(inner_w * reading.percent / 100)))
+        level_w = max(1, int(round(inner_w * fill_percent / 100)))
         draw.rectangle((icon_x + 2, y + 2, icon_x + 1 + level_w, y + h - 3), fill=fill)
 
         if reading.on_external_power:
