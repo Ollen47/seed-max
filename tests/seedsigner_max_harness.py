@@ -690,14 +690,105 @@ def test_qr_display_centered():
     check(sizes and sizes[0] == (320, 320), f"QR rendered at the largest square that fits: {sizes[:1]}")
     check(canvas.getpixel((240, 160)) == (255, 255, 255) and canvas.getpixel((80, 5)) == (255, 255, 255),
           "QR centered: x 80..399")
-    check(canvas.getpixel((40, 160)) == (0, 0, 0) and canvas.getpixel((450, 300)) == (0, 0, 0),
-          "the side bars are black: nothing of the previous screen shows through")
+    check(canvas.getpixel((40, 40)) == (0, 0, 0) and canvas.getpixel((40, 300)) == (0, 0, 0) and canvas.getpixel((404, 160)) == (0, 0, 0),
+          "the side bars are black around the controls: nothing of the previous screen shows through")
     screenshot("max_qr_display.png")
 
     K = HardwareButtonsConstants
     check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__SWIPE, 240, 100, direction=TouchEvent.SWIPE__UP)) == K.KEY_UP,
           "QR: drag up = brighter")
-    check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 240, 100, tap=True)) == K.KEY_PRESS, "QR: tap = done")
+    check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 240, 100, tap=True)) is None,
+          "QR: a tap on the QR code itself no longer closes the screen")
+
+
+def test_qr_display_touch_controls():
+    """
+    0019: brightness on the signed-PSBT (and every other) QR screen. "+"/"-" in the right
+    bar, "Done" in the left bar; taps on the QR code are ignored and light up "Done".
+    """
+    import threading
+    from seedsigner.gui.components import GUIConstants
+    from seedsigner.gui.screens.screen import QRDisplayScreen
+    from seedsigner.models.settings import Settings
+    K = HardwareButtonsConstants
+    settings = Settings.get_instance()
+    settings.set_value(SettingsConstants.SETTING__QR_BRIGHTNESS_TIPS, SettingsConstants.OPTION__ENABLED)
+    settings.set_value(SettingsConstants.SETTING__QR_BRIGHTNESS, 124)
+    renderer = Renderer.get_instance()
+
+    encoder = MagicMock()
+    parts = []
+    def part(width, height, border=2, background_color=None):
+        parts.append(background_color)
+        return Image.new("RGB", (width, height), "#" + background_color)
+    encoder.next_part_image = part
+    encoder.part_to_image = lambda p, w, h, border=2, background_color=None: Image.new("RGB", (w, h), "red")
+
+    screen = QRDisplayScreen(qr_encoder=encoder)
+    check(screen.touch_controls, "480x320: controls in the 80 px side bars")
+    rects = screen.control_rects()
+    check(rects["done"][0] >= 0 and rects["done"][2] <= 80 and rects["brighter"][0] >= 400 and rects["darker"][3] <= 320,
+          f"controls stay inside the side bars, off the QR code (x 80..399): {rects}")
+    for name, rect in rects.items():
+        if name != "meter":
+            check(rect[2] - rect[0] >= 60 and rect[3] - rect[1] >= 80, f"{name}: at least 60 x 80 px (~9 x 12 mm): {rect}")
+
+    taps = {
+        "qr": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 240, 160, tap=True)),
+        "qr corner": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 90, 310, tap=True)),
+        "left bar, off Done": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 40, 20, tap=True)),
+        "brighter": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, *center(rects["brighter"]), tap=True)),
+        "darker": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, *center(rects["darker"]), tap=True)),
+        "right bar top edge": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 470, 2, tap=True)),
+        "done": screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, *center(rects["done"]), tap=True)),
+        "press, not yet a tap": screen.handle_touch(TouchEvent(TouchEvent.TYPE__DOWN, *center(rects["done"]))),
+    }
+    check(taps == {"qr": None, "qr corner": None, "left bar, off Done": None, "brighter": K.KEY_UP, "darker": K.KEY_DOWN,
+                   "right bar top edge": K.KEY_UP, "done": K.KEY_PRESS, "press, not yet a tap": None},
+          f"tap zones: {taps}")
+    check(screen.done_hint_until.cur_count > time.time_ns(), "a tap on the QR code lights up Done")
+
+    # Rendering: the joystick tip is off (it would cover the QR code), the controls are drawn
+    thread = screen.threads[-1]
+    thread.keep_running = True
+    t = threading.Thread(target=thread.run, daemon=True)
+    t.start()
+    time.sleep(0.4)
+    thread.keep_running = False
+    t.join(1)
+    canvas = renderer.canvas
+    accent = tuple(int(GUIConstants.ACCENT_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+    check(canvas.getpixel((240, 160)) != (255, 0, 0), "no brightness tip over the QR code on the Max")
+    check(canvas.getpixel((rects["done"][0] + 3, center(rects["done"])[1])) == accent, "Done highlighted after the tap on the QR")
+    meter = rects["meter"]
+    lit = [canvas.getpixel((center(meter)[0], int(meter[3] - (i + 0.5) * (meter[3] - meter[1]) / 8))) for i in range(8)]
+    white = tuple(int(GUIConstants.BUTTON_FONT_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+    check([c == white for c in lit] == [True] * 4 + [False] * 4, "meter: 4 of 8 segments at brightness 124")
+    check(canvas.getpixel(center(rects["brighter"])) == white and canvas.getpixel(center(rects["darker"])) == white,
+          "+ and - drawn")
+    screenshot("max_qr_display_controls.png")
+
+    # The real screen loop, driven by touches: nothing closes it but Done
+    hw, touch = setup_inputs()
+    settings.set_value(SettingsConstants.SETTING__QR_BRIGHTNESS, 124)
+    parts.clear()
+    screen = QRDisplayScreen(qr_encoder=encoder)
+    rects = screen.control_rects()
+    touch.set_script(GUARD
+        + tap((240, 160)) + tap((150, 60))                                      # fingers on the QR code
+        + tap(center(rects["brighter"])) + tap(center(rects["brighter"]))       # 124 -> 155 -> 186
+        + tap(center(rects["darker"]))                                          # -> 155
+        + drag((240, 250), (240, 120), duration=0.5)                            # finger up 130 px: 2 steps -> 217
+        + [(0.4, None)]
+        + tap(center(rects["done"])))
+    started = time.monotonic()
+    screen.display()
+    elapsed = time.monotonic() - started
+    check(elapsed > 2.0, f"taps on the QR code and on +/- don't close it; Done does ({elapsed:.1f} s)")
+    check(screen.qr_brightness.cur_count == 217, f"+, +, -, drag up 2 rows: 124 -> 217 ({screen.qr_brightness.cur_count})")
+    check(settings.get_value(SettingsConstants.SETTING__QR_BRIGHTNESS) == 217, "the chosen brightness is kept for the next QR")
+    check("d9d9d9" in parts, f"the QR background follows the brightness (0xd9 = 217): {sorted(set(parts))}")
+    settings.set_value(SettingsConstants.SETTING__QR_BRIGHTNESS_TIPS, SettingsConstants.OPTION__DISABLED)
 
 
 
@@ -1088,6 +1179,7 @@ if __name__ == "__main__":
     test_mnemonic_entry_screen()
     test_camera_loops_get_touch_input()
     test_qr_display_centered()
+    test_qr_display_touch_controls()
     test_touch_calibration()
     test_press_reading_drops_landing_noise()
     test_touch_raw_test_screen()

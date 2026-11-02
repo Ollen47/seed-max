@@ -938,13 +938,15 @@ class QRDisplayScreen(BaseScreen):
     qr_encoder: BaseQrEncoder = None
 
     class QRDisplayThread(BaseThread):
-        def __init__(self, qr_encoder: BaseQrEncoder, qr_brightness: ThreadsafeCounter, tips_start_time: ThreadsafeCounter):
+        def __init__(self, qr_encoder: BaseQrEncoder, qr_brightness: ThreadsafeCounter, tips_start_time: ThreadsafeCounter, overlay=None):
             from seedsigner.gui.renderer import Renderer
             super().__init__()
             self.qr_encoder = qr_encoder
             self.qr_brightness = qr_brightness
             self.renderer = Renderer.get_instance()
             self.tips_start_time = tips_start_time
+            # SeedSigner Max: draws the touch controls beside the QR code on every frame
+            self.overlay = overlay
 
 
         def render_brightness_tip(self, image: Image.Image) -> None:
@@ -1025,6 +1027,10 @@ class QRDisplayScreen(BaseScreen):
             settings = Settings.get_instance()
             cur_brightness_setting = settings.get_value(SettingsConstants.SETTING__QR_BRIGHTNESS_TIPS)
             is_brightness_tip_enabled = cur_brightness_setting == SettingsConstants.OPTION__ENABLED
+            if self.overlay is not None:
+                # SeedSigner Max: the "Brighter / Darker" joystick tip would cover the
+                # bottom of the QR code; the touch controls beside it are always visible.
+                is_brightness_tip_enabled = False
             pending_encoder_restart = False
 
             # Loop whether the QR is a single frame or animated; each loop might adjust
@@ -1058,6 +1064,9 @@ class QRDisplayScreen(BaseScreen):
                     frame.paste(image.convert("RGB"), (int((frame.width - image.width) / 2), int((frame.height - image.height) / 2)))
                     image = frame
 
+                if self.overlay is not None:
+                    self.overlay(image)
+
                 with self.renderer.lock:
                     self.renderer.show_image(image)
 
@@ -1075,22 +1084,138 @@ class QRDisplayScreen(BaseScreen):
             initial_value=settings.get_value(SettingsConstants.SETTING__QR_BRIGHTNESS))
         self.tips_start_time = ThreadsafeCounter(initial_value=time.time_ns())
 
+        # SeedSigner Max: brightness and "Done" buttons in the black bars beside the QR
+        # code (480x320: a 320 px QR leaves 80 px on each side)
+        from seedsigner.hardware import hw_profile
+        qr_size = min(self.canvas_width, self.canvas_height)
+        self.touch_controls = hw_profile.is_max_profile() and (self.canvas_width - qr_size) // 2 >= self.CONTROLS_MIN_BAR_WIDTH
+        self.done_hint_until = ThreadsafeCounter(initial_value=0)      # time.time_ns()
+
         self.threads.append(QRDisplayScreen.QRDisplayThread(
             qr_encoder=self.qr_encoder,
             qr_brightness=self.qr_brightness,
-            tips_start_time=self.tips_start_time
+            tips_start_time=self.tips_start_time,
+            overlay=self.render_touch_controls if self.touch_controls else None,
         ))
+
+
+    # -----------------------------------------------------------------------------------
+    # SeedSigner Max: touch controls
+    # -----------------------------------------------------------------------------------
+    # On the stock device the joystick changes the brightness and any other key closes
+    # the screen. Translated literally to touch (v4: drag for brightness, tap to close),
+    # every attempt to adjust the brightness closed the screen at the first touch: a drag
+    # only counts after 20 px of travel, and a finger resting on the screen while it is
+    # held up to a webcam closed it too, losing the signed PSBT QR.
+    #
+    # Now the QR code itself ignores touches. The right bar has a big "+" (brighter) in its
+    # upper half and "-" (darker) in its lower half, with a level meter between them; the
+    # left bar has the "Done" button, the only way out. A tap on the QR code lights up
+    # "Done" for a moment, to show where it is. Dragging up/down anywhere still changes
+    # the brightness.
+    CONTROLS_MIN_BAR_WIDTH = 64     # px: narrower side bars (other panels) keep tap = close
+    CONTROLS_MARGIN = 8             # px between a control and the bar's edges
+    DONE_HEIGHT = 84                # px: the Done button, centered vertically in the left bar
+    DONE_TOUCH_SLOP = 10            # px around Done that still count as Done
+    DONE_HINT_NS = 1_500_000_000    # Done highlighted this long after a tap on the QR code
+    BRIGHTNESS_STEP = 31            # same steps as the joystick: 31..255
+    BRIGHTNESS_LEVELS = 8
+
+    def control_rects(self) -> dict:
+        """ On-screen (x1, y1, x2, y2) of each control, as drawn """
+        w, h = self.canvas_width, self.canvas_height
+        bar = (w - min(w, h)) // 2
+        m = self.CONTROLS_MARGIN
+        third = (h - 2 * m) // 3
+        done_top = (h - self.DONE_HEIGHT) // 2
+        return {
+            "done": (m, done_top, bar - m, done_top + self.DONE_HEIGHT),
+            "brighter": (w - bar + m, m, w - m, m + third - m),
+            "meter": (w - bar + m, m + third, w - m, m + 2 * third - m),
+            "darker": (w - bar + m, m + 2 * third, w - m, h - m),
+        }
+
+
+    def touch_zone(self, x: int, y: int) -> str | None:
+        """
+        "brighter", "darker" or "done" for a tap at (x, y), else None. The whole right bar
+        is live (upper half brighter, lower half darker); in the left bar only Done is.
+        """
+        w, h = self.canvas_width, self.canvas_height
+        bar = (w - min(w, h)) // 2
+        if x >= w - bar:
+            return "brighter" if y < h / 2 else "darker"
+        if x < bar and rect_contains(self.control_rects()["done"], x, y, margin=self.DONE_TOUCH_SLOP):
+            return "done"
+        return None
+
+
+    def brightness_level(self) -> int:
+        """ 1..8, as shown by the meter (31 -> 1 ... 248 or 255 -> 8) """
+        return max(1, min(self.BRIGHTNESS_LEVELS, self.qr_brightness.cur_count // self.BRIGHTNESS_STEP))
+
+
+    def render_touch_controls(self, image: Image.Image):
+        """ Draw the controls into the black side bars of a full-screen frame """
+        from seedsigner.gui.components import Fonts
+        draw = ImageDraw.Draw(image)
+        rects = self.control_rects()
+        button_color = GUIConstants.BUTTON_BACKGROUND_COLOR
+        symbol_color = GUIConstants.BUTTON_FONT_COLOR
+
+        # Brighter (+) and darker (-)
+        for name in ("brighter", "darker"):
+            x1, y1, x2, y2 = rects[name]
+            draw.rounded_rectangle((x1, y1, x2, y2), radius=8, fill=button_color)
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            arm, thick = 14, 3
+            draw.rectangle((cx - arm, cy - thick, cx + arm, cy + thick), fill=symbol_color)
+            if name == "brighter":
+                draw.rectangle((cx - thick, cy - arm, cx + thick, cy + arm), fill=symbol_color)
+
+        # Level meter: one segment per step, filled up to the current level
+        x1, y1, x2, y2 = rects["meter"]
+        level = self.brightness_level()
+        gap = 3
+        seg_h = (y2 - y1 - (self.BRIGHTNESS_LEVELS - 1) * gap) / self.BRIGHTNESS_LEVELS
+        for i in range(self.BRIGHTNESS_LEVELS):
+            # Bottom segment = level 1
+            top = y2 - (i + 1) * seg_h - i * gap
+            fill = GUIConstants.BUTTON_FONT_COLOR if i < level else GUIConstants.INACTIVE_COLOR
+            draw.rectangle((x1 + 14, int(top), x2 - 14, int(top + seg_h)), fill=fill)
+
+        # Done: highlighted for a moment after a tap on the QR code
+        hinted = time.time_ns() < self.done_hint_until.cur_count
+        x1, y1, x2, y2 = rects["done"]
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=8,
+                               fill=GUIConstants.ACCENT_COLOR if hinted else button_color)
+        font = Fonts.get_font(GUIConstants.get_button_font_name(), GUIConstants.get_button_font_size())
+        draw.text(((x1 + x2) // 2, (y1 + y2) // 2), _("Done"),
+                  fill=GUIConstants.BUTTON_SELECTED_FONT_COLOR if hinted else symbol_color,
+                  font=font, anchor="mm")
 
 
     def handle_touch(self, event: TouchEvent):
         """
-        SeedSigner Max: drag up/down for a brighter/darker QR code (like the joystick),
-        tap to leave.
+        SeedSigner Max: dragging up/down changes the brightness (like the joystick). With
+        the side-bar controls: "+"/"-" taps change it, "Done" closes the screen, taps on the
+        QR code are ignored (and point to Done). Without them: a tap closes the screen.
         """
         if event.is_swipe:
             return HardwareButtonsConstants.KEY_UP if event.direction == TouchEvent.SWIPE__UP else HardwareButtonsConstants.KEY_DOWN
-        if event.is_tap:
+        if not event.is_tap:
+            return None
+        if not getattr(self, "touch_controls", False):
             return HardwareButtonsConstants.KEY_PRESS
+
+        zone = self.touch_zone(event.x, event.y)
+        if zone == "brighter":
+            return HardwareButtonsConstants.KEY_UP
+        if zone == "darker":
+            return HardwareButtonsConstants.KEY_DOWN
+        if zone == "done":
+            return HardwareButtonsConstants.KEY_PRESS
+        self.done_hint_until.set_value(time.time_ns() + self.DONE_HINT_NS)
         return None
 
 
