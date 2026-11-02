@@ -68,6 +68,14 @@ class ScanScreen(BaseScreen):
         self.camera = Camera.get_instance()
         self.camera.start_video_stream_mode(resolution=self.resolution, framerate=self.framerate, format="rgb")
 
+        # SeedSigner Max: zoom for small QR codes (button at the top right of the preview)
+        self.zoom_button_rect = None
+        if hw_profile.is_max_profile():
+            from seedsigner.models.settings import Settings, SettingsConstants
+            zoom = int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM) or hw_profile.CAMERA_ZOOM)
+            self.camera.set_zoom(zoom)
+            self.zoom_button_rect = self.zoom_rect(self.canvas_width)
+
         self.frames_decode_status = ThreadsafeCounter()
 
         self.threads.append(ScanScreen.LivePreviewThread(
@@ -78,6 +86,31 @@ class ScanScreen(BaseScreen):
             frame_decode_status=self.frames_decode_status,
         ))
         self.threads[-1].capture_size = self.resolution[0]
+        self.threads[-1].zoom_button_rect = self.zoom_button_rect
+
+
+    # SeedSigner Max: zoom button, top right of the live preview (the frame-rate overlay,
+    # when on, is at the top left; "< back" and the progress bar are at the bottom)
+    ZOOM_BUTTON_SIZE = (96, 44)
+    ZOOM_TOUCH_SLOP = 12
+
+    @classmethod
+    def zoom_rect(cls, canvas_width: int) -> tuple[int, int, int, int]:
+        w, h = cls.ZOOM_BUTTON_SIZE
+        right = canvas_width - GUIConstants.EDGE_PADDING
+        return (right - w, GUIConstants.EDGE_PADDING, right, GUIConstants.EDGE_PADDING + h)
+
+
+    def toggle_zoom(self):
+        """ Next step of hw_profile.CAMERA_ZOOM_STEPS, applied at once, kept until restart """
+        from seedsigner.hardware import hw_profile
+        from seedsigner.models.settings import Settings, SettingsConstants
+        steps = list(hw_profile.CAMERA_ZOOM_STEPS)
+        current = self.camera.zoom
+        zoom = steps[(steps.index(current) + 1) % len(steps)] if current in steps else steps[0]
+        self.camera.set_zoom(zoom)
+        Settings.get_instance().set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, zoom)
+        return zoom
 
 
     class LivePreviewThread(BaseThread):
@@ -97,6 +130,7 @@ class ScanScreen(BaseScreen):
             self.render_height = self.render_rect[3] - self.render_rect[1]
             self.decoder_fps = "0.0"
             self.capture_size = 480
+            self.zoom_button_rect = None       # SeedSigner Max: drawn when set
 
             super().__init__()
 
@@ -234,6 +268,9 @@ class ScanScreen(BaseScreen):
                                     width=1,
                                 )
 
+                        if self.zoom_button_rect:
+                            self.render_zoom_button(frame, self.zoom_button_rect, self.camera.zoom)
+
                         if show_fps:
                             preview_fps = 0.0
                             if len(preview_times) > 1:
@@ -250,6 +287,20 @@ class ScanScreen(BaseScreen):
 
 
         @staticmethod
+        def render_zoom_button(frame: Image.Image, rect: tuple, zoom) -> None:
+            """ SeedSigner Max: "Zoom 2x" pill, highlighted when zoomed in """
+            draw = ImageDraw.Draw(frame)
+            zoomed = zoom != 1
+            draw.rounded_rectangle(rect, radius=10,
+                                   fill=GUIConstants.ACCENT_COLOR if zoomed else (0, 0, 0),
+                                   outline=GUIConstants.BODY_FONT_COLOR, width=1)
+            font = Fonts.get_font(GUIConstants.get_button_font_name(), GUIConstants.get_button_font_size())
+            draw.text((int((rect[0] + rect[2]) / 2), int((rect[1] + rect[3]) / 2)), _("Zoom") + f" {zoom}x",
+                      fill=GUIConstants.BUTTON_SELECTED_FONT_COLOR if zoomed else GUIConstants.BODY_FONT_COLOR,
+                      font=font, anchor="mm")
+
+
+        @staticmethod
         def fps_text(preview_fps: float, decoder_fps: str, capture_size: int) -> str:
             """ SeedSigner Max: the frame-rate overlay """
             return f"preview {preview_fps:4.1f} fps  decode {decoder_fps} fps  {capture_size}px"
@@ -258,10 +309,17 @@ class ScanScreen(BaseScreen):
     def handle_touch(self, event):
         """
         SeedSigner Max: "< back" is drawn at the bottom of the live preview. A tap on
-        the lower part of the screen leaves; the rest of the screen ignores touches, so
-        a thumb resting on it while aiming doesn't abort the scan.
+        the lower part of the screen leaves; the zoom button at the top right cycles the
+        zoom; the rest of the screen ignores touches, so a thumb resting on it while
+        aiming doesn't abort the scan.
         """
         from seedsigner.hardware.buttons import HardwareButtonsConstants
+        from seedsigner.hardware.touch import rect_contains
+        zoom_rect = getattr(self, "zoom_button_rect", None)
+        if event.is_tap and zoom_rect and rect_contains(zoom_rect, event.x, event.y, margin=self.ZOOM_TOUCH_SLOP):
+            # SeedSigner Max: the zoom button; the scan goes on
+            self.toggle_zoom()
+            return None
         if event.is_tap and event.y > self.canvas_height * 0.6:
             return HardwareButtonsConstants.KEY_LEFT
         return None

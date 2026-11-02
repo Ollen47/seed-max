@@ -701,6 +701,80 @@ def test_qr_display_centered():
           "QR: a tap on the QR code itself no longer closes the screen")
 
 
+def test_scan_zoom_button():
+    """
+    0020: zoom button at the top right of the scan preview. Starts at the setting's value,
+    cycles 1x -> 2x -> 3x -> 1x on the camera at once, remembered for the next scan;
+    "< back" and the rest of the preview behave as before.
+    """
+    import threading
+    import seedsigner.hardware.camera as camera_module          # MagicMock in this harness
+    from seedsigner.gui.components import GUIConstants
+    from seedsigner.gui.screens.scan_screens import ScanScreen
+    from seedsigner.models.settings import Settings
+    K = HardwareButtonsConstants
+
+    class FakeCamera:
+        def __init__(self, frame):
+            self.zoom, self.applied, self.frame = 1, [], frame
+            self._video_stream = object()
+        def start_video_stream_mode(self, **kwargs):
+            self.started = kwargs
+        def set_zoom(self, factor):
+            self.zoom = factor
+            self.applied.append(factor)
+        def read_video_stream(self, as_image=False, rgb=False):
+            time.sleep(0.05)
+            return self.frame.copy()
+
+    import qrcode
+    qr = qrcode.make("bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", border=2).convert("RGB")
+    camera_frame = Image.new("RGB", (320, 320), (70, 80, 90))
+    camera_frame.paste(qr.resize((120, 120)), (100, 100))
+    fake = FakeCamera(camera_frame)
+    saved_get_instance = camera_module.Camera.get_instance
+    camera_module.Camera.get_instance = lambda: fake
+    settings = Settings.get_instance()
+    try:
+        settings.set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, 2)
+        decoder = MagicMock()
+        decoder.get_percent_complete = MagicMock(return_value=0)
+        screen = ScanScreen(decoder=decoder, instructions_text="Scan a QR code")
+        check(fake.applied == [2], f"the scan starts at the Camera zoom setting: {fake.applied}")
+        rect = screen.zoom_button_rect
+        check(rect[2] <= 480 and rect[1] >= 0 and rect[3] < 320 * 0.6 and rect[0] > 300,
+              f"zoom button at the top right, clear of the '< back' strip: {rect}")
+
+        tap_zoom = TouchEvent(TouchEvent.TYPE__UP, *center(rect), tap=True)
+        results = [screen.handle_touch(tap_zoom) for _ in range(3)]
+        check(results == [None] * 3 and fake.applied == [2, 3, 1, 2], f"tap: 2x -> 3x -> 1x -> 2x, scan goes on: {fake.applied}")
+        check(settings.get_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM) == 2, "the zoom is kept for the next scan")
+        check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 100, 300, tap=True)) == K.KEY_LEFT, "'< back' still leaves")
+        check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 240, 150, tap=True)) is None and fake.applied[-1] == 2,
+              "the rest of the preview still ignores touches")
+        check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__SWIPE, *center(rect), direction=TouchEvent.SWIPE__UP)) is None
+              and len(fake.applied) == 4, "only a tap on the button changes the zoom")
+
+        # The button is drawn on the live preview
+        thread = screen.threads[0]
+        thread.keep_running = True
+        t = threading.Thread(target=thread.run, daemon=True)
+        t.start()
+        time.sleep(0.4)
+        thread.keep_running = False
+        t.join(1)
+        canvas = Renderer.get_instance().canvas
+        accent = tuple(int(GUIConstants.ACCENT_COLOR[i:i + 2], 16) for i in (1, 3, 5))
+        check(canvas.getpixel((rect[0] + 6, rect[3] - 6)) == accent, "zoomed in: the button is orange")
+        screenshot("max_scan_zoom_2x.png")
+        fake.zoom = 1
+        ScanScreen.LivePreviewThread.render_zoom_button(canvas, rect, 1)
+        check(canvas.getpixel((rect[0] + 6, rect[3] - 6)) == (0, 0, 0), "at 1x: black button")
+    finally:
+        camera_module.Camera.get_instance = saved_get_instance
+        settings.set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, 1)
+
+
 def test_qr_display_touch_controls():
     """
     0019: brightness on the signed-PSBT (and every other) QR screen. "+"/"-" in the right
@@ -1180,6 +1254,7 @@ if __name__ == "__main__":
     test_camera_loops_get_touch_input()
     test_qr_display_centered()
     test_qr_display_touch_controls()
+    test_scan_zoom_button()
     test_touch_calibration()
     test_press_reading_drops_landing_noise()
     test_touch_raw_test_screen()

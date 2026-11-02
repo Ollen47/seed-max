@@ -228,6 +228,14 @@ CAMERA_RESOLUTION = 320
 # Settings > Advanced > Camera rotation changes it until the next restart.
 CAMERA_ROTATION = 270
 
+# QR scanner zoom (2 Nov 2026): the camera's own image processor crops the middle of the
+# sensor before scaling it to CAMERA_RESOLUTION (Camera.set_zoom), so a small QR code
+# fills more of the frame at no CPU cost. 1 = the whole field (stock). The zoom button
+# at the top right of the scan preview cycles CAMERA_ZOOM_STEPS; the choice stays until
+# the next restart. Settings > Advanced > Hardware > Camera zoom sets the starting value.
+CAMERA_ZOOM = 1
+CAMERA_ZOOM_STEPS = (1, 2, 3)
+
 
 def is_max_profile() -> bool:
     return ACTIVE_PROFILE == PROFILE__MAX

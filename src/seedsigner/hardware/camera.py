@@ -1,4 +1,5 @@
 import io
+import logging
 
 from gettext import gettext as _
 from PIL import Image
@@ -6,6 +7,7 @@ from PIL import Image
 from seedsigner.models.settings import Settings, SettingsConstants
 from seedsigner.models.singleton import Singleton
 
+logger = logging.getLogger(__name__)
 
 
 class CameraConnectionError(Exception):
@@ -17,6 +19,7 @@ class Camera(Singleton):
     _video_stream = None
     _picamera = None
     _camera_rotation = None
+    _zoom = 1           # SeedSigner Max: digital zoom of the video stream (see set_zoom)
 
     @classmethod
     def get_instance(cls):
@@ -59,6 +62,44 @@ class Camera(Singleton):
                     image = image.convert('RGBA')
                 return image.rotate(90 + self._camera_rotation)
         return None
+
+
+    @staticmethod
+    def zoom_roi(factor: float) -> tuple[float, float, float, float]:
+        """
+        SeedSigner Max: the centered region of interest for a zoom `factor`, in
+        picamera's normalized (x, y, w, h) sensor coordinates: 1 -> the whole frame,
+        2 -> the middle half of each side, 3 -> the middle third.
+        """
+        factor = max(1.0, float(factor))
+        side = 1.0 / factor
+        offset = (1.0 - side) / 2.0
+        return (offset, offset, side, side)
+
+
+    @property
+    def zoom(self):
+        return self._zoom
+
+
+    def set_zoom(self, factor):
+        """
+        SeedSigner Max: digital zoom on the running video stream, done by the camera's
+        own image processor (picamera's `zoom` region of interest, MMAL crop) before the
+        frame is scaled down to the capture size. It costs the Pi Zero's CPU nothing.
+
+        It is real magnification, not an upscale: at 320 x 320 the sensor mode used for
+        the scanner (1296 x 972, binned) gives ~3 sensor pixels per output pixel across
+        the square field, so 2x still has ~1.5 and 3x ~1 real pixel per output pixel. A
+        small QR code (an address in Sparrow's Receive tab) gets 2-3 times more pixels
+        per module, which zbar needs, at the same distance from the screen.
+        """
+        self._zoom = factor
+        if self._video_stream is not None:
+            try:
+                self._video_stream.camera.zoom = self.zoom_roi(factor)
+            except Exception as e:
+                logger.info(f"Camera zoom not applied: {e}")
 
 
     def stop_video_stream_mode(self):

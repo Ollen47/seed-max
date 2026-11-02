@@ -237,6 +237,12 @@ class SettingsConstants:
         (400, "400 x 400"),
         (320, "320 x 320"),
     ]
+    # SeedSigner Max: QR scanner zoom (camera ISP crop)
+    ALL_MAX_CAMERA_ZOOMS = [
+        (1, "1x"),
+        (2, "2x"),
+        (3, "3x"),
+    ]
     # SeedSigner Max: SPI clock for the display's pixel data
     ALL_MAX_DISPLAY_SPI_MHZ = [
         (16, "16 MHz"),
@@ -360,6 +366,7 @@ class SettingsConstants:
     SETTING__SCRAMBLED_KEYBOARD = "scrambled_keyboard"   # SeedSigner Max
     SETTING__MAX_CAMERA_RESOLUTION = "max_camera_resolution"   # SeedSigner Max (tuning)
     SETTING__MAX_DISPLAY_SPI_MHZ = "max_display_spi_mhz"       # SeedSigner Max (tuning)
+    SETTING__MAX_CAMERA_ZOOM = "max_camera_zoom"               # SeedSigner Max
     SETTING__CAMERA_ROTATION = "camera_rotation"
     SETTING__COMPACT_SEEDQR = "compact_seedqr"
     SETTING__BIP85_CHILD_SEEDS = "bip85_child_seeds"
@@ -778,6 +785,15 @@ class SettingsDefinition:
                       visibility=SettingsConstants.VISIBILITY__HARDWARE if hw_profile.is_max_profile() else SettingsConstants.VISIBILITY__HIDDEN,
                       selection_options=SettingsConstants.ALL_MAX_CAMERA_RESOLUTIONS,
                       default_value=hw_profile.CAMERA_RESOLUTION),
+
+        SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
+                      attr_name=SettingsConstants.SETTING__MAX_CAMERA_ZOOM,
+                      abbreviated_name="max_cam_zoom",
+                      display_name=_mft("Camera zoom"),
+                      type=SettingsConstants.TYPE__SELECT_1,
+                      visibility=SettingsConstants.VISIBILITY__HARDWARE if hw_profile.is_max_profile() else SettingsConstants.VISIBILITY__HIDDEN,
+                      selection_options=SettingsConstants.ALL_MAX_CAMERA_ZOOMS,
+                      default_value=hw_profile.CAMERA_ZOOM),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__SYSTEM,
                       attr_name=SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ,
