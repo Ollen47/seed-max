@@ -23,10 +23,11 @@ CASET/PASET/RAMWR, so no pixel data ever continues across transactions.
 
 Bands of 128 rows (122880 bytes) were still too long: on the board the colors broke
 again ~68 rows into each 128-row band (red as blue, orange as violet: bytes swapped),
-i.e. at ~65536 bytes into the transfer, while the last band (64 rows, 61440 bytes) was
-right everywhere. A single SPI transfer longer than 64 KiB is split once more below
-spidev (the BCM2835 SPI controller counts a transfer in a 16-bit register), and the
-converter loses the word alignment there too. So FRAME_BAND_ROWS is 64: five bands of
+i.e. at ~65535 bytes into the transfer, while the last band (64 rows, 61440 bytes) was
+right everywhere. A single write longer than that is split once more below this driver,
+at 65535 bytes, an odd count (py-spidev caps one write at 65535 bytes; the BCM2835's
+transfer length register is 16 bits too), and the converter loses the word alignment
+there. So FRAME_BAND_ROWS is 64: five bands of
 61440 bytes, every pixel transfer under 64 KiB.
 
 The init sequence (power, VCOM, gamma) and the landscape MADCTL are the Linux driver's.
@@ -34,6 +35,7 @@ There is no backlight pin on this board: the backlight is always on.
 
 The touch controller (XPT2046) sits on the same SPI bus on CE1; see `hardware/xpt2046.py`.
 """
+import threading
 import time
 from dataclasses import dataclass
 
@@ -104,15 +106,22 @@ class ILI9486(BaseDisplayDriver):
         # can then only affect the pixels, never the init sequence or the window.
         self._cmd_speed_hz = min(CMD_MAX_SPEED_HZ, hw_profile.ILI9486_SPI_SPEED_HZ)
 
+        # D/C selects command or data for everything that follows on the bus, so a command
+        # from one thread inside another thread's pixel band would be taken as pixels, or
+        # pixels as commands. The Renderer lock covers frames, but not every caller (the
+        # "Invert colors" setting calls invert() directly): the driver serializes itself.
+        self._lock = threading.RLock()
+
         self.init()
 
 
     def command(self, cmd: int, data: list[int] = None):
-        GPIO.output(self._dc, GPIO.LOW)
-        self._spi.xfer2(words([cmd]), self._cmd_speed_hz)
-        if data:
-            GPIO.output(self._dc, GPIO.HIGH)
-            self._spi.xfer2(words(data), self._cmd_speed_hz)
+        with self._lock:
+            GPIO.output(self._dc, GPIO.LOW)
+            self._spi.xfer2(words([cmd]), self._cmd_speed_hz)
+            if data:
+                GPIO.output(self._dc, GPIO.HIGH)
+                self._spi.xfer2(words(data), self._cmd_speed_hz)
 
 
     def reset(self):
@@ -125,6 +134,11 @@ class ILI9486(BaseDisplayDriver):
 
 
     def init(self):
+        with self._lock:
+            self._init()
+
+
+    def _init(self):
         self.reset()
 
         self.command(ITFCTR1)
@@ -172,14 +186,18 @@ class ILI9486(BaseDisplayDriver):
         """
         # Pixel clock from Settings > Advanced > Hardware > Display speed (tuning; the
         # commands keep their own 10 MHz cap)
-        self._spi.max_speed_hz = self.pixel_speed_hz()
         row_bytes = width * 2
         rows_per_band = max(1, min(FRAME_BAND_ROWS, min(SPIDEV_BUFSIZ, MAX_PIXEL_TRANSFER) // row_bytes))
-        for band_y in range(0, height, rows_per_band):
-            band_rows = min(rows_per_band, height - band_y)
-            self._set_window(x0, y0 + band_y, x0 + width - 1, y0 + band_y + band_rows - 1)
-            GPIO.output(self._dc, GPIO.HIGH)
-            self._spi.writebytes2(pixels[band_y * row_bytes:(band_y + band_rows) * row_bytes])
+        with self._lock:
+            self._spi.max_speed_hz = self.pixel_speed_hz()
+            for band_y in range(0, height, rows_per_band):
+                band_rows = min(rows_per_band, height - band_y)
+                band = pixels[band_y * row_bytes:(band_y + band_rows) * row_bytes]
+                # The board's converter needs whole 16-bit words in one transfer
+                assert len(band) % 2 == 0 and len(band) <= MAX_PIXEL_TRANSFER
+                self._set_window(x0, y0 + band_y, x0 + width - 1, y0 + band_y + band_rows - 1)
+                GPIO.output(self._dc, GPIO.HIGH)
+                self._spi.writebytes2(band)
 
 
     @staticmethod
@@ -188,7 +206,8 @@ class ILI9486(BaseDisplayDriver):
         try:
             from seedsigner.models.settings import Settings, SettingsConstants
             mhz = Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ)
-            if mhz:
+            if mhz and int(mhz) in [value for value, _ in SettingsConstants.ALL_MAX_DISPLAY_SPI_MHZ]:
+                # Only the listed speeds: a settings file on the microSD can't ask for more
                 return int(mhz) * 1_000_000
         except Exception:
             pass

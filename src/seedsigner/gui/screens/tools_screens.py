@@ -170,7 +170,13 @@ class ToolsImageEntropyFinalImageScreen(BaseScreen):
             self.renderer.show_image()
 
         # LEFT = reshoot, RIGHT / ANYCLICK = accept
-        input = self.hw_inputs.wait_for([HardwareButtonsConstants.KEY_LEFT, HardwareButtonsConstants.KEY_RIGHT] + HardwareButtonsConstants.KEYS__ANYCLICK)
+        from seedsigner.hardware import hw_profile
+        while True:
+            input = self.hw_inputs.wait_for([HardwareButtonsConstants.KEY_LEFT, HardwareButtonsConstants.KEY_RIGHT] + HardwareButtonsConstants.KEYS__ANYCLICK)
+            if input != HardwareButtonsConstants.OVERRIDE or not hw_profile.is_max_profile():
+                break
+            # SeedSigner Max: a toast (e.g. a battery warning) breaks the wait for input;
+            # it is not the user accepting the picture
         if input == HardwareButtonsConstants.KEY_LEFT:
             return RET_CODE__BACK_BUTTON
 

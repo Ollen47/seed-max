@@ -12,6 +12,15 @@ from seedsigner.models.threads import BaseThread, ThreadsafeCounter
 from .screen import BaseScreen
 
 
+def listed_int(value, allowed, default: int) -> int:
+    """ SeedSigner Max: `value` as an int if it is one of `allowed`, else `default` (junk included) """
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return value if value in allowed else default
+
+
 
 
 @dataclass
@@ -59,7 +68,9 @@ class ScanScreen(BaseScreen):
         # SeedSigner Max: capture size from Settings > Advanced > Hardware (tuning)
         if hw_profile.is_max_profile():
             from seedsigner.models.settings import Settings, SettingsConstants
-            size = int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_RESOLUTION) or hw_profile.CAMERA_RESOLUTION)
+            # Only the listed sizes (a settings file on the microSD could say anything)
+            size = listed_int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_RESOLUTION),
+                              [value for value, _ in SettingsConstants.ALL_MAX_CAMERA_RESOLUTIONS], hw_profile.CAMERA_RESOLUTION)
             self.resolution = (size, size)
 
         # TODO: Arrange this with UI elements rather than text
@@ -72,7 +83,8 @@ class ScanScreen(BaseScreen):
         self.zoom_button_rect = None
         if hw_profile.is_max_profile():
             from seedsigner.models.settings import Settings, SettingsConstants
-            zoom = int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM) or hw_profile.CAMERA_ZOOM)
+            zoom = listed_int(Settings.get_instance().get_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM),
+                              hw_profile.CAMERA_ZOOM_STEPS, hw_profile.CAMERA_ZOOM)
             self.camera.set_zoom(zoom)
             self.zoom_button_rect = self.zoom_rect(self.canvas_width)
 
@@ -87,6 +99,24 @@ class ScanScreen(BaseScreen):
         ))
         self.threads[-1].capture_size = self.resolution[0]
         self.threads[-1].zoom_button_rect = self.zoom_button_rect
+
+
+    def display(self):
+        """
+        SeedSigner Max: no battery warning while scanning. A toast holds the Renderer lock
+        for its 5 s, which froze the live preview in the middle of an animated PSBT. A
+        warning that comes due meanwhile is shown once the scan is over.
+        """
+        from seedsigner.hardware import hw_profile
+        if not hw_profile.is_max_profile():
+            return super().display()
+        from seedsigner.hardware.power import BatteryMonitor
+        monitor = BatteryMonitor.get_instance()
+        monitor.pause_warnings(True)
+        try:
+            return super().display()
+        finally:
+            monitor.pause_warnings(False)
 
 
     # SeedSigner Max: zoom button, top right of the live preview (the frame-rate overlay,

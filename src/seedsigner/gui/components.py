@@ -1821,6 +1821,9 @@ class TopNav(BaseComponent):
             return
         shown = monitor.shown_percent()
         fill_percent = monitor.fill_percent()
+        if fill_percent is None:
+            # The reading went stale between the calls above: no icon this time
+            return
 
         # No number while charging: the cell's voltage then reads high whatever the charge
         percent_text = f"{shown}%" if shown is not None else ""

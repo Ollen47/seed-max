@@ -617,6 +617,11 @@ class ButtonListScreen(BaseTopNavScreen):
             logger.info(f"Hold hint not shown: {e}")
 
 
+    def button_requires_hold(self, index: int) -> bool:
+        """ True if button `index` needs a hold instead of a tap (see `requires_hold_to_confirm`) """
+        return self.requires_hold_to_confirm
+
+
     def handle_touch(self, event: TouchEvent):
         code = self.touch_top_nav(event)
         if code is not None:
@@ -630,7 +635,7 @@ class ButtonListScreen(BaseTopNavScreen):
         if index is None:
             return None
 
-        if self.requires_hold_to_confirm:
+        if self.button_requires_hold(index):
             # Only a hold confirms: a tap, however firm, does nothing here
             if event.is_down:
                 self.touch_select_button(index)
@@ -646,6 +651,8 @@ class ButtonListScreen(BaseTopNavScreen):
 
 
     def _run(self):
+        from seedsigner.hardware import hw_profile
+        is_max = hw_profile.is_max_profile()
         while True:
             ret = self._run_callback()
             if ret is not None:
@@ -660,6 +667,14 @@ class ButtonListScreen(BaseTopNavScreen):
                     HardwareButtonsConstants.KEY_RIGHT,
                 ] + HardwareButtonsConstants.KEYS__ANYCLICK
             )
+
+            if is_max and user_input == HardwareButtonsConstants.OVERRIDE:
+                # SeedSigner Max: a toast (e.g. "Hold to confirm") breaks the wait for input
+                # and holds the Renderer lock while it is shown. Waiting here for that lock
+                # left the touch panel unread: the finger lifting went unseen, and the input
+                # guard then ate the next press, the very hold the hint asks for. Nothing
+                # to do for a toast: straight back to reading the panel.
+                continue
 
             with self.renderer.lock:
                 if not self.top_nav.is_selected and (
@@ -1099,6 +1114,23 @@ class QRDisplayScreen(BaseScreen):
         ))
 
 
+    def display(self) -> Any:
+        """
+        SeedSigner Max: no battery warning while the QR code is up (see
+        BatteryMonitor.pause_warnings); a warning that comes due meanwhile is shown once
+        the screen closes. A signed PSBT stays on screen until "Done".
+        """
+        if not getattr(self, "touch_controls", False):
+            return super().display()
+        from seedsigner.hardware.power import BatteryMonitor
+        monitor = BatteryMonitor.get_instance()
+        monitor.pause_warnings(True)
+        try:
+            return super().display()
+        finally:
+            monitor.pause_warnings(False)
+
+
     # -----------------------------------------------------------------------------------
     # SeedSigner Max: touch controls
     # -----------------------------------------------------------------------------------
@@ -1240,6 +1272,11 @@ class QRDisplayScreen(BaseScreen):
                 # Incrase QR code background brightness
                 self.qr_brightness.set_value(min(self.qr_brightness.cur_count + 31, 255))
                 self.tips_start_time.set_value(time.time_ns())
+
+            elif user_input == HardwareButtonsConstants.OVERRIDE and getattr(self, "touch_controls", False):
+                # SeedSigner Max: a toast breaks the wait for input (`override_ind`). It is
+                # not the user tapping "Done": the QR code (a signed PSBT) stays on screen.
+                continue
 
             else:
                 # Any other input exits the screen

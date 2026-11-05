@@ -312,6 +312,83 @@ def test_monitor_warnings():
     assert m.warning_due(now, None, None) == (None, None), "no warnings on the USB cable"
 
 
+def test_warnings_wait_while_a_qr_code_is_on_screen():
+    """
+    0021: no battery toast while a QR code is up (a toast used to close the signed-PSBT
+    QR screen). The warning that came due is shown at the first check after it.
+    """
+    import time
+    m = monitor()
+    now = time.time()
+    m.recent = []
+    m.add_reading(BatteryReading(3.6, -400, hw_profile.BATTERY_LOW_PERCENT), now=now)
+
+    m.pause_warnings(True)
+    text, last_warning, last_level = m.next_warning(now, None, None)
+    assert text is None and last_warning is None and last_level is None, "held back while paused"
+    assert m.is_low, "the battery icon still turns red"
+
+    m.pause_warnings(False)
+    text, last_warning, last_level = m.next_warning(now + 5, last_warning, last_level)
+    assert "Battery low" in text and last_warning == now + 5 and last_level == "low", "shown right after"
+    assert m.next_warning(now + 10, last_warning, last_level)[0] is None, "then on its usual schedule"
+
+    # Unpaused, the loop behaves as before: the same results as warning_due()
+    m.recent = []
+    m.add_reading(BatteryReading(3.4, -400, hw_profile.BATTERY_CRITICAL_PERCENT), now=now)
+    text, last_warning, last_level = m.next_warning(now + 20, last_warning, last_level)
+    assert "almost empty" in text and last_level == "critical"
+
+
+def test_warnings_have_hysteresis():
+    """
+    0021: near a threshold the estimate wobbles by a point from one check to the next.
+    A level is kept until the estimate is 3 points above it, and only a worse level warns
+    at once: one toast per crossing, then the reminders.
+    """
+    import time
+    m = monitor()
+    now = time.time()
+    low, critical = hw_profile.BATTERY_LOW_PERCENT, hw_profile.BATTERY_CRITICAL_PERCENT
+
+    def check_at(t, percent, state):
+        m.recent = []
+        m.add_reading(BatteryReading(3.6, -400, percent), now=t)
+        text, last_warning, last_level = m.next_warning(t, *state)
+        return text, (last_warning, last_level)
+
+    state, toasts = (None, None), []
+    for k, percent in enumerate([low + 1, low, low + 1, low, low + 1, low + 2, low, low + 1]):
+        text, state = check_at(now + 5 * k, percent, state)
+        toasts.append(text)
+    assert sum(t is not None for t in toasts) == 1, f"wobbling around {low}%: one toast, not {toasts}"
+    assert state[1] == "low"
+
+    text, state = check_at(now + 60, low + m.WARNING_HYSTERESIS_PERCENT + 1, state)
+    assert text is None and state[1] is None, "well above the threshold: the level clears"
+
+    state, toasts = (None, None), []
+    for k, percent in enumerate([critical, critical + 1, critical, critical + 2, critical + 1]):
+        text, state = check_at(now + 5 * k, percent, state)
+        toasts.append(text)
+    assert sum(t is not None for t in toasts) == 1 and state[1] == "critical", f"critical, wobbling: {toasts}"
+
+    text, state = check_at(now + 30, critical + m.WARNING_HYSTERESIS_PERCENT + 2, state)
+    assert text is None and state[1] == "low", "back up to 'low': no new toast for getting better"
+
+
+def test_gauge_search_survives_a_stuck_bus():
+    """ 0021: SCL held low during the search is a miss (the monitor gives up), not an exception """
+    from seedsigner.hardware.ina219 import I2CError, INA219Gauge
+
+    class StuckBus:
+        def probe(self, address):
+            raise I2CError("SCL held low")
+
+    gauge = INA219Gauge(bus=StuckBus())
+    assert gauge.find() is None and gauge.read() is None
+
+
 def test_monitor_starts_only_with_a_gauge_or_carrier(monkeypatch):
     from seedsigner.hardware import power
     started = []

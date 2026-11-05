@@ -94,7 +94,13 @@ def parse_response(response: list[int], pressure_threshold: int) -> tuple[int, i
     pressure = z1 + 4095 - z2
     if pressure < pressure_threshold:
         return None
-    return (median3(x1, x2, x3), median3(y1, y2, y3), pressure)
+    x, y = median3(x1, x2, x3), median3(y1, y2, y3)
+    if any(v in (0, 0x0FFF) for v in (z1, z2, x, y)):
+        # A stuck MISO line (every bit 0 or every bit 1) would read as the strongest
+        # possible press at a corner of the screen. A real contact never saturates the
+        # 12-bit converter on these channels (this panel: x ~260-3780, y ~200-3930).
+        return None
+    return (x, y, pressure)
 
 
 

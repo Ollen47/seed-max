@@ -254,6 +254,23 @@ def encode_response(values):
     return response
 
 
+def test_parse_response_rejects_a_stuck_miso_line():
+    """
+    0021: with MISO stuck at 0 or at 1 during a press, every result reads 0x000 or 0xFFF:
+    pressure z1 + 4095 - z2 = 4095, the strongest press, at a corner of the screen.
+    Saturated readings are dropped; real ones are unaffected.
+    """
+    from seedsigner.hardware.xpt2046 import parse_response
+    assert parse_response([0x00] * len(READ_SEQUENCE), 400) is None, "MISO stuck low"
+    assert parse_response([0xFF] * len(READ_SEQUENCE), 400) is None, "MISO stuck high"
+    # A real press: z1 900, z2 2600, x ~2000, y ~1800
+    real = encode_response([900, 2600, 0, 2001, 2000, 1999, 0, 1801, 1800, 1799])
+    assert parse_response(real, 400) == (2000, 1800, 900 + 4095 - 2600)
+    # One channel pinned at a limit is enough to distrust the sample
+    assert parse_response(encode_response([900, 2600, 0, 4095, 4095, 4095, 0, 1801, 1800, 1799]), 400) is None
+
+
+
 def test_read_sequence_shape():
     """
     Z1, Z2, then X four times and Y four times in a row, ending with the power down. Each

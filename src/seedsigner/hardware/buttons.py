@@ -61,6 +61,13 @@ class HardwareButtons(Singleton):
             cls._instance.GPIO = GPIO
             cls._instance.override_ind = False
 
+            # SeedSigner Max: no joystick and no KEY1-3, the touch screen is the only input.
+            # Header pins 29-40 are left bare (the display covers 1-26) and pin 33 (KEY_PRESS)
+            # sits next to GND on pin 34: anything bridging them would "press" with no
+            # input guard and no hold-to-confirm. So the key pins are not read at all.
+            from seedsigner.hardware import hw_profile
+            cls._instance.gpio_keys = not hw_profile.is_max_profile()
+
             # Track state over time so we can apply input delays/ignores as needed
             cls._instance.cur_input = None           # Track which direction or button was last pressed
             cls._instance.cur_input_started = None   # Track when that input began
@@ -86,7 +93,7 @@ class HardwareButtons(Singleton):
     def _get_touch_device(self):
         """
         The XPT2046 driver, created on first use. None on the stock profile, or if the
-        controller can't be opened (then the joystick, if wired, still works).
+        controller can't be opened (then nothing can be pressed: fails closed).
         """
         if self.touch_device is None and not self.touch_device_failed:
             from seedsigner.hardware import hw_profile
@@ -229,7 +236,7 @@ class HardwareButtons(Singleton):
                     return code
 
             # Check each candidate key to see if it was pressed
-            for key in keys:
+            for key in (keys if getattr(self, "gpio_keys", True) else []):
                 if self.GPIO.input(key) == GPIO.LOW:
                     if self.cur_input != key:
                         self.cur_input = key
@@ -281,7 +288,7 @@ class HardwareButtons(Singleton):
         """ Returns True if one of the target keys/key is pressed """
         if key:
             keys = [key]
-        for key in keys:
+        for key in (keys if getattr(self, "gpio_keys", True) else []):
             if self.GPIO.input(key) == self.GPIO.LOW:
                 self.update_last_input_time()
                 return True
@@ -303,7 +310,7 @@ class HardwareButtons(Singleton):
 
     def has_any_input(self) -> bool:
         """ Returns True if any of the keys are pressed """
-        for key in HardwareButtonsConstants.ALL_KEYS:
+        for key in (HardwareButtonsConstants.ALL_KEYS if getattr(self, "gpio_keys", True) else []):
             if self.GPIO.input(key) == GPIO.LOW:
                 return True
 

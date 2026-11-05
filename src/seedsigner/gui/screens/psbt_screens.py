@@ -646,6 +646,15 @@ class PSBTAddressDetailsScreen(ButtonListScreen):
 
 @dataclass
 class PSBTChangeDetailsScreen(ButtonListScreen):
+    # SeedSigner Max: "Skip verification" (multisig change, no descriptor loaded) is the one
+    # choice here that lowers the protection, and it sits right below "Verify": it needs a
+    # hold, so a tap aimed at "Verify" that lands a few pixels low can't skip the check.
+    HOLD_TO_CONFIRM_LABELS = ("Skip verification",)
+
+    def button_requires_hold(self, index: int) -> bool:
+        option = self.button_data[index] if self.button_data and 0 <= index < len(self.button_data) else None
+        return getattr(option, "button_label", None) in self.HOLD_TO_CONFIRM_LABELS or super().button_requires_hold(index)
+
     amount: int = 0
     address: str = None
     is_multisig: bool = False
@@ -782,7 +791,9 @@ class PSBTFinalizeScreen(ButtonListScreen):
         icon.screen_x = int((self.canvas_width - icon.width)/2)
         self.components.append(icon)
 
+        from seedsigner.hardware import hw_profile
         self.components.append(TextArea(
-            text=_("Click to approve this transaction"),
+            # SeedSigner Max: approving needs the finger held on the button (hold to confirm)
+            text=_("Hold the button to approve this transaction") if hw_profile.is_max_profile() else _("Click to approve this transaction"),
             screen_y=icon.screen_y + icon.height + 2*GUIConstants.COMPONENT_PADDING
         ))

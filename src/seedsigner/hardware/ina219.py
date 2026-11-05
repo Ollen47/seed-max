@@ -293,7 +293,14 @@ class INA219Gauge:
     def find(self) -> int | None:
         """ The first address in BATTERY_INA219_ADDRESSES that answers """
         for address in hw_profile.BATTERY_INA219_ADDRESSES:
-            if self.bus.probe(address):
+            try:
+                found = self.bus.probe(address)
+            except I2CError as e:
+                # probe() recovers the bus itself; if even that fails (SCL held low), this
+                # search counts as a miss, so the monitor gives up after a few of them
+                logger.info(f"INA219 search failed: {e}")
+                return None
+            if found:
                 self.address = address
                 logger.info(f"INA219 found at 0x{address:02X}")
                 return address

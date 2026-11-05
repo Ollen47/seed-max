@@ -457,22 +457,6 @@ class TouchCalibrationView(View):
 
         return done
 
-        result = self.run_screen(settings_screens.TouchCalibrationScreen)
-        if result is not None:
-            calibration, max_error = result
-            previous = device.calibration
-            device.calibration = calibration
-            choice = self.run_screen(
-                settings_screens.TouchCalibrationResultScreen,
-                calibration_values=calibration.as_tuple(),
-                max_error_px=max_error,
-            )
-            if choice != 0:
-                # "Discard", or nothing could be tapped before the timeout
-                device.calibration = previous
-
-        return done
-
 
 
 class DonateView(View):

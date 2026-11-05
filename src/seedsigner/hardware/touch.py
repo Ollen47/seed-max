@@ -12,10 +12,10 @@ Design choices that matter for a signing device:
   samples, a release only after RELEASE_SAMPLES consecutive empty ones spanning at
   least RELEASE_MS. Resistive panels flicker in and out at low pressure, above all
   while a finger or stylus slides; this keeps one press (or one drag) from becoming
-  two. The release is timed, not just counted: HardwareButtons.wait_for() polls the
-  panel in a tight loop (a sample every ~1-2 ms on the Pi Zero), so three samples
-  were only a few milliseconds, and any short pressure dip in the middle of a drag
-  ended it. Each restarted drag then had to cross TAP_SLOP_PX again before counting
+  two. The release is timed, not just counted: HardwareButtons.wait_for() reads the
+  panel about every 10 ms, and the camera screens' loops read it back to back, so
+  three samples could be only a few milliseconds, and any short pressure dip in the
+  middle of a drag ended it. Each restarted drag then had to cross TAP_SLOP_PX again before counting
   SWIPE_STEP_PX, and long lists could not be scrolled on the real panel.
 - The position is the median of the last three samples, so a single wild sample (they
   happen as pressure drops at release) can't move the finger.

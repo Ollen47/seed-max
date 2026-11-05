@@ -94,6 +94,7 @@ class BatteryMonitor(Singleton, BaseThread):
     CONFIRM_READINGS = 3
     REMIND_EVERY_S = 5 * 60
     CRITICAL_REMIND_S = 60
+    WARNING_HYSTERESIS_PERCENT = 3     # a warning level is left only this far above its threshold
     READINGS_KEPT = 3
     STALE_AFTER_S = 60              # no good reading for this long: hide the icon
     GIVE_UP_AFTER = 6               # INA219 not found this many times in a row: stop
@@ -112,6 +113,7 @@ class BatteryMonitor(Singleton, BaseThread):
             monitor.fast = False
             monitor.latest = None          # last good reading, unfiltered
             monitor.last_battery_percent = None   # last estimate made on battery (off the cable)
+            monitor.warnings_paused = False      # True while a QR code is on screen (pause_warnings)
         return cls._instance
 
 
@@ -122,6 +124,16 @@ class BatteryMonitor(Singleton, BaseThread):
         if (hw_profile.has_carrier() or hw_profile.has_battery_gauge()) and _gpio() is not None:
             self._monitoring = True
             self.start()
+
+
+    def pause_warnings(self, paused: bool):
+        """
+        No battery toast while a QR code is on screen (QRDisplayScreen). Every toast breaks
+        the screen's wait for input (`override_ind`, upstream), and the QR screen used to
+        take that as "done": the signed PSBT vanished and had to be signed again. A warning
+        that comes due meanwhile is shown at the first check after the QR screen closes.
+        """
+        self.warnings_paused = paused
 
 
     @property
@@ -185,15 +197,39 @@ class BatteryMonitor(Singleton, BaseThread):
         reading = self.current
         if reading is None or reading.on_external_power:
             return None, None
-        if reading.percent <= hw_profile.BATTERY_CRITICAL_PERCENT:
-            level, text, every = "critical", _("Battery almost empty ({}%)").format(reading.percent), self.CRITICAL_REMIND_S
-        elif reading.percent <= hw_profile.BATTERY_LOW_PERCENT:
-            level, text, every = "low", _("Battery low ({}%)").format(reading.percent), self.REMIND_EVERY_S
+        # Hysteresis: a level, once reached, is kept until the estimate is clearly above its
+        # threshold. Near 15% the estimate wobbles by a point from one check to the next
+        # (4 mV steps, load changes), and every re-entry used to warn again at once.
+        percent, margin = reading.percent, self.WARNING_HYSTERESIS_PERCENT
+        if percent <= hw_profile.BATTERY_CRITICAL_PERCENT or (
+                last_level == "critical" and percent <= hw_profile.BATTERY_CRITICAL_PERCENT + margin):
+            level, text, every = "critical", _("Battery almost empty ({}%)").format(percent), self.CRITICAL_REMIND_S
+        elif percent <= hw_profile.BATTERY_LOW_PERCENT or (
+                last_level in ("low", "critical") and percent <= hw_profile.BATTERY_LOW_PERCENT + margin):
+            level, text, every = "low", _("Battery low ({}%)").format(percent), self.REMIND_EVERY_S
         else:
             return None, None
-        if level != last_level or last_warning is None or now - last_warning >= every:
+        # At once only when it gets worse (or the first time); otherwise on the reminder schedule
+        severity = {None: 0, "low": 1, "critical": 2}
+        if severity[level] > severity.get(last_level, 0) or last_warning is None or now - last_warning >= every:
             return text, level
         return None, level
+
+
+    def next_warning(self, now: float, last_warning: float | None, last_level: str | None):
+        """
+        One check of the gauge loop: (toast text or None, last_warning, last_level) to
+        carry to the next check. While warnings are paused (a QR code on screen) a warning
+        that is due is held back and the state is left as it was, so it is due again at
+        the first check after the pause.
+        """
+        text, level = self.warning_due(now, last_warning, last_level)
+        self.is_low = level is not None
+        if text and getattr(self, "warnings_paused", False):
+            return None, last_warning, last_level
+        if text:
+            last_warning = now
+        return text, last_warning, level
 
 
     def _run_carrier(self):
@@ -215,7 +251,7 @@ class BatteryMonitor(Singleton, BaseThread):
                 if low_readings >= self.CONFIRM_READINGS:
                     self.is_low = True
                     now = time.time()
-                    if last_warning is None or now - last_warning >= self.REMIND_EVERY_S:
+                    if (last_warning is None or now - last_warning >= self.REMIND_EVERY_S) and not getattr(self, "warnings_paused", False):
                         last_warning = now
                         Controller.get_instance().activate_toast(WarningToast(_("Battery low"), duration=5))
             except Exception as e:
@@ -230,7 +266,11 @@ class BatteryMonitor(Singleton, BaseThread):
         from seedsigner.hardware.ina219 import INA219Gauge
 
         if self.gauge is None:
-            self.gauge = INA219Gauge()
+            try:
+                self.gauge = INA219Gauge()
+            except Exception as e:
+                logger.exception(f"Battery monitor: no gauge: {e}")
+                return
         not_found = 0
         last_warning = None
         last_level = None
@@ -244,12 +284,9 @@ class BatteryMonitor(Singleton, BaseThread):
                 else:
                     self.add_reading(self.gauge.read())
                     now = time.time()
-                    text, level = self.warning_due(now, last_warning, last_level)
-                    self.is_low = level is not None
+                    text, last_warning, last_level = self.next_warning(now, last_warning, last_level)
                     if text:
-                        last_warning = now
                         Controller.get_instance().activate_toast(WarningToast(text, duration=5))
-                    last_level = level
             except Exception as e:
                 logger.exception(f"Battery monitor: {e}")
 

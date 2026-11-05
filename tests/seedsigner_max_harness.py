@@ -770,9 +770,265 @@ def test_scan_zoom_button():
         fake.zoom = 1
         ScanScreen.LivePreviewThread.render_zoom_button(canvas, rect, 1)
         check(canvas.getpixel((rect[0] + 6, rect[3] - 6)) == (0, 0, 0), "at 1x: black button")
+        # 0021: no battery warning while scanning (a toast froze the preview for 5 s)
+        from seedsigner.gui.screens.screen import BaseScreen
+        from seedsigner.hardware.power import BatteryMonitor
+        seen = []
+        saved_display = BaseScreen.display
+        BaseScreen.display = lambda self: seen.append(BatteryMonitor.get_instance().warnings_paused)
+        try:
+            ScanScreen.display(screen)
+        finally:
+            BaseScreen.display = saved_display
+        check(seen == [True] and BatteryMonitor.get_instance().warnings_paused is False,
+              f"battery warnings paused during the scan, resumed after: {seen}")
     finally:
         camera_module.Camera.get_instance = saved_get_instance
         settings.set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, 1)
+
+
+def test_toasts_dont_close_a_qr_or_accept_a_picture():
+    """
+    0021: a toast (battery warning) breaks the wait for input with OVERRIDE. The QR screen
+    used to take it as "Done" (the signed PSBT vanished) and the camera-entropy review as
+    "accept". Now both keep waiting for the user, and no battery warning is raised while a
+    QR code is on screen.
+    """
+    import threading
+    from seedsigner.gui.screens.screen import QRDisplayScreen, RET_CODE__BACK_BUTTON
+    from seedsigner.gui.screens.tools_screens import ToolsImageEntropyFinalImageScreen
+    from seedsigner.hardware.power import BatteryMonitor
+    from seedsigner.models.settings import Settings
+
+    encoder = MagicMock()
+    encoder.next_part_image = lambda w, h, border=2, background_color=None: Image.new("RGB", (w, h), "white")
+    encoder.part_to_image = lambda p, w, h, border=2, background_color=None: Image.new("RGB", (w, h), "white")
+    Settings.get_instance().set_value(SettingsConstants.SETTING__QR_BRIGHTNESS, 124)
+
+    monitor = BatteryMonitor.get_instance()
+    paused_during = []
+    hw, touch = setup_inputs()
+    screen = QRDisplayScreen(qr_encoder=encoder)
+    done = center(screen.control_rects()["done"])
+
+    def toasts():
+        # Two toasts while the QR code is up (what activate_toast() does to the input)
+        for delay in (0.7, 0.5):
+            time.sleep(delay)
+            paused_during.append(monitor.warnings_paused)
+            hw.trigger_override()
+
+    threading.Thread(target=toasts, daemon=True).start()
+    touch.set_script(GUARD + [(1.6, None)] + tap(done))
+    started = time.monotonic()
+    screen.display()
+    elapsed = time.monotonic() - started
+    check(elapsed > 1.9, f"two toasts don't close the QR screen, Done does ({elapsed:.1f} s)")
+    check(paused_during == [True, True], f"battery warnings are paused while the QR code is up: {paused_during}")
+    check(monitor.warnings_paused is False, "and resume when it closes")
+
+    # Camera entropy: a toast is not "accept"; the user's tap on the left half reshoots
+    hw, touch = setup_inputs()
+    screen = ToolsImageEntropyFinalImageScreen(final_image=Image.new("RGB", (480, 480), (40, 60, 80)))
+    threading.Thread(target=lambda: (time.sleep(0.7), hw.trigger_override()), daemon=True).start()
+    touch.set_script(GUARD + [(0.6, None)] + tap((100, 160)))
+    result = screen.display()
+    check(result == RET_CODE__BACK_BUTTON, f"entropy picture: a toast doesn't accept it, the tap on 'reshoot' counts ({result!r})")
+
+
+def test_skip_multisig_change_check_needs_a_hold():
+    """
+    0021: with no multisig descriptor loaded, the change screen offers "Verify" and, right
+    below it, "Skip verification". Skipping needs a hold, so a tap aimed at "Verify" that
+    lands low can't skip the check; "Verify" itself still takes a plain tap.
+    """
+    from seedsigner.gui.screens.screen import ButtonOption
+    from seedsigner.gui.screens.psbt_screens import PSBTChangeDetailsScreen, PSBTFinalizeScreen
+    from seedsigner.views.psbt_views import PSBTChangeDetailsView
+
+    # The buttons exactly as the upstream View builds them: if upstream ever renames the
+    # label, this fails instead of the hold silently disappearing
+    check(PSBTChangeDetailsView.SKIP_VERIFICATION.button_label in PSBTChangeDetailsScreen.HOLD_TO_CONFIRM_LABELS,
+          f"the hold matches the View's own label: {PSBTChangeDetailsView.SKIP_VERIFICATION.button_label!r}")
+
+    def change_screen():
+        return PSBTChangeDetailsScreen(
+            title="Your Change",
+            button_data=[PSBTChangeDetailsView.VERIFY_MULTISIG, PSBTChangeDetailsView.SKIP_VERIFICATION],
+            address="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount=10_000, is_multisig=True,
+            fingerprint="73c5da0a", derivation_path="m/48h/0h/0h/2h/1/0",
+            is_change_derivation_path=True, derivation_path_addr_index=0, is_change_addr_verified=False)
+
+    screen = change_screen()
+    check([screen.button_requires_hold(i) for i in range(2)] == [False, True], "only 'Skip verification' needs a hold")
+
+    hw, touch = setup_inputs()
+    screen = change_screen()
+    skip = _button_center(screen, 1)
+    verify = _button_center(screen, 0)
+    touch.set_script(GUARD + tap(skip, down=0.3, up=0.3) + tap(verify))
+    check(screen.display() == 0, "a tap on 'Skip verification' does nothing, a tap on 'Verify' verifies")
+
+    hw, touch = setup_inputs()
+    screen = change_screen()
+    touch.set_script(GUARD + [(1.3, skip), (0.2, None)])
+    check(screen.display() == 1, "holding 'Skip verification' for a second skips")
+
+    from seedsigner.gui.components import TextArea
+    texts = [c.text for c in PSBTFinalizeScreen(button_data=[ButtonOption("Approve PSBT")]).components if isinstance(c, TextArea)]
+    check(any("Hold" in t for t in texts), f"the sign screen says to hold, not to click: {texts}")
+
+
+
+def test_joystick_pins_are_not_read():
+    """
+    0021: the Max has no joystick; header pins 29-40 are bare and pin 33 (KEY_PRESS) sits
+    next to GND (pin 34). A key pin pulled low must not press anything, above all not
+    "Approve" on the sign screen, which needs a hold.
+    """
+    import seedsigner.hardware.buttons as buttons_module
+    from seedsigner.gui.screens.screen import ButtonOption, RET_CODE__BACK_BUTTON
+    from seedsigner.gui.screens.psbt_screens import PSBTFinalizeScreen
+    hw, touch = setup_inputs()
+    pressed = {HardwareButtons.KEY_PRESS_PIN, HardwareButtons.KEY1_PIN, HardwareButtons.KEY3_PIN}
+    buttons_module.GPIO.input = lambda pin: 0 if pin in pressed else 1
+    try:
+        screen = PSBTFinalizeScreen(button_data=[ButtonOption("Approve PSBT")])
+        touch.set_script(GUARD + [(0.4, None)] + tap((30, 30)))
+        check(screen.display() == RET_CODE__BACK_BUTTON, "KEY_PRESS shorted to GND: no approval, only the tap on back counts")
+        check(hw.has_any_input() is False, "a shorted key pin doesn't count as input (toasts, screensaver)")
+    finally:
+        buttons_module.GPIO.input = lambda pin: 1
+    check(getattr(hw, "gpio_keys", True) is False, "Max profile: the joystick/KEY pins are not polled")
+
+
+def test_display_driver_serializes_itself():
+    """
+    0021: the "Invert colors" setting calls invert() without the Renderer lock. A command
+    in the middle of another thread's pixel band would be taken as pixels (or pixels as
+    commands). The driver now holds its own lock around each sequence.
+    """
+    import threading
+    import spidev
+    import RPi.GPIO as GPIO
+    from seedsigner.hardware.displays.display_driver import DisplayDriverFactory, DISPLAY_TYPE__ILI9486
+    saved = (spidev.SpiDev, GPIO.setup, GPIO.output, GPIO.LOW, GPIO.HIGH)
+    try:
+        _display_lock_checks(spidev, GPIO, DisplayDriverFactory, DISPLAY_TYPE__ILI9486, threading)
+    finally:
+        spidev.SpiDev, GPIO.setup, GPIO.output, GPIO.LOW, GPIO.HIGH = saved
+
+
+def _display_lock_checks(spidev, GPIO, DisplayDriverFactory, DISPLAY_TYPE__ILI9486, threading):
+    log = []
+    spi = MagicMock()
+    def xfer(data, speed_hz=0, *a):
+        log.append(("xfer", list(data)))
+        time.sleep(0.0005)
+        return [0] * len(data)
+    def pixels(data):
+        log.append(("pixels", len(data)))
+        time.sleep(0.002)
+    spi.xfer2 = MagicMock(side_effect=xfer)
+    spi.writebytes2 = MagicMock(side_effect=pixels)
+    spidev.SpiDev = MagicMock(return_value=spi)
+    GPIO.setup = MagicMock()
+    GPIO.LOW, GPIO.HIGH = 0, 1
+    GPIO.output = lambda pin, value: log.append(("dc", value)) if pin == hw_profile.ILI9486_PIN_DC else None
+    disp = DisplayDriverFactory.instantiate_display_driver(DISPLAY_TYPE__ILI9486, width=480, height=320)
+    log.clear()
+
+    def toggle():
+        for _ in range(30):
+            disp.invert(True)
+            disp.invert(False)
+            time.sleep(0.001)
+    t = threading.Thread(target=toggle, daemon=True)
+    t.start()
+    frames = 0
+    while t.is_alive() or frames < 4:
+        disp.show_image(Image.new("RGB", (480, 320), "orange"))
+        frames += 1
+    t.join(1)
+
+    # Every pixel band must come right after its own D/C-high, preceded by RAMWR (0x2C)
+    broken = 0
+    for i, entry in enumerate(log):
+        if entry[0] == "pixels":
+            if not (i >= 2 and log[i - 1] == ("dc", 1) and log[i - 2] == ("xfer", [0x00, 0x2C])):
+                broken += 1
+    bands = sum(1 for e in log if e[0] == "pixels")
+    inverts = sum(1 for e in log if e[0] == "xfer" and e[1] in ([0x00, 0x21], [0x00, 0x20]))
+    check(bands == 5 * frames and inverts == 60 and broken == 0,
+          f"invert() from another thread never lands inside a pixel band ({frames} frames, {inverts} inverts, {broken} broken)")
+
+    from seedsigner.models.settings import Settings
+    settings = Settings.get_instance()
+    settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 125)
+    check(disp.pixel_speed_hz() == hw_profile.ILI9486_SPI_SPEED_HZ, "a display speed that isn't listed falls back to the default")
+    settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, 32)
+    check(disp.pixel_speed_hz() == 32_000_000, "a listed one is used")
+    settings.set_value(SettingsConstants.SETTING__MAX_DISPLAY_SPI_MHZ, hw_profile.ILI9486_SPI_SPEED_HZ // 1_000_000)
+
+
+
+def test_hold_hint_doesnt_eat_the_next_press():
+    """
+    0021: a tap where a hold is needed shows "Hold to confirm" (a real toast: it holds the
+    Renderer lock for 2 s and breaks the wait for input). The screen used to wait for that
+    lock without reading the panel, and the next press, the hold the hint asks for or a
+    corrected tap, was lost. Real toast threads here.
+    """
+    import seedsigner.controller
+    from seedsigner.gui.screens.screen import ButtonOption
+    from seedsigner.gui.screens.psbt_screens import PSBTChangeDetailsScreen, PSBTFinalizeScreen
+    from seedsigner.views.psbt_views import PSBTChangeDetailsView
+
+    def run(make, first, second, gap, second_down):
+        hw, touch = setup_inputs()
+        toasts = []
+        def activate_toast(toast):
+            toasts.append(toast)
+            toast.start()
+        ctl = SimpleNamespace(screensaver_activation_ms=10**9, is_screensaver_start_allowed=False, activate_toast=activate_toast)
+        seedsigner.controller.Controller.get_instance = staticmethod(lambda: ctl)
+        screen = make()
+        a, b = _button_center(screen, first), _button_center(screen, second)
+        touch.set_script(GUARD + tap(a, down=0.2, up=gap) + [(second_down, b), (0.2, None)], timeout_s=3.5)
+        try:
+            result = screen.display()
+        except TimeoutError:
+            result = "lost"
+        for toast in toasts:
+            toast.join(3)
+        return result, len(toasts)
+
+    sign = lambda: PSBTFinalizeScreen(button_data=[ButtonOption("Approve PSBT")])
+    change = lambda: PSBTChangeDetailsScreen(
+        title="Your Change", button_data=[PSBTChangeDetailsView.VERIFY_MULTISIG, PSBTChangeDetailsView.SKIP_VERIFICATION],
+        address="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount=10_000, is_multisig=True, fingerprint="73c5da0a",
+        derivation_path="m/48h/0h/0h/2h/1/0", is_change_derivation_path=True, derivation_path_addr_index=0,
+        is_change_addr_verified=False)
+
+    result, n = run(sign, 0, 0, 0.4, 1.3)
+    check(result == 0 and n == 1, f"sign: tap (hint shown), then the hold 0.4 s later approves ({result!r}, {n} toast)")
+    result, n = run(change, 1, 0, 0.4, 0.15)
+    check(result == 0 and n == 1, f"change: tap on Skip (hint), then a tap on Verify 0.4 s later verifies ({result!r})")
+    result, n = run(change, 1, 1, 0.4, 1.3)
+    check(result == 1 and n == 1, f"change: tap on Skip (hint), then holding Skip skips ({result!r})")
+
+
+def test_camera_settings_from_a_file_are_checked():
+    """ 0021: camera resolution and zoom from a settings file: only listed values, junk included """
+    from seedsigner.gui.screens.scan_screens import listed_int
+    from seedsigner.models.settings_definition import SettingsConstants as C
+    sizes = [v for v, _ in C.ALL_MAX_CAMERA_RESOLUTIONS]
+    cases = {"400": 400, 480: 480, 999: 320, "junk": 320, None: 320, "": 320, 3.7: 320}
+    got = {repr(k): listed_int(k, sizes, hw_profile.CAMERA_RESOLUTION) for k in cases}
+    check(got == {repr(k): v for k, v in cases.items()}, f"camera resolution: listed or the default: {got}")
+    check([listed_int(z, hw_profile.CAMERA_ZOOM_STEPS, hw_profile.CAMERA_ZOOM) for z in (2, "3", 7, "x", None)] == [2, 3, 1, 1, 1],
+          "camera zoom: listed or 1")
+
 
 
 def test_qr_display_touch_controls():
@@ -1151,6 +1407,17 @@ def test_battery_icon():
         check(green in colors_in((440, 10, 475, 38)), "80%: green battery icon at the top right")
         screenshot("max_battery_icon_menu.png")
 
+        # 0021: the reading goes stale between render_battery()'s calls (I2): no icon, no error
+        saved_fill = monitor.fill_percent
+        monitor.fill_percent = lambda: None
+        try:
+            screen = _menu(show_back_button=True)
+            with renderer.lock:
+                screen._render()
+            check(green not in colors_in((440, 10, 475, 38)), "stale between calls: the icon is skipped, no exception")
+        finally:
+            monitor.fill_percent = saved_fill
+
         home = MainMenuScreen(button_data=[ButtonOption(t) for t in ("Scan", "Seeds", "Tools", "Settings")])
         with renderer.lock:
             home._render()
@@ -1254,6 +1521,12 @@ if __name__ == "__main__":
     test_camera_loops_get_touch_input()
     test_qr_display_centered()
     test_qr_display_touch_controls()
+    test_toasts_dont_close_a_qr_or_accept_a_picture()
+    test_skip_multisig_change_check_needs_a_hold()
+    test_joystick_pins_are_not_read()
+    test_display_driver_serializes_itself()
+    test_hold_hint_doesnt_eat_the_next_press()
+    test_camera_settings_from_a_file_are_checked()
     test_scan_zoom_button()
     test_touch_calibration()
     test_press_reading_drops_landing_noise()
