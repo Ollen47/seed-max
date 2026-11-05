@@ -1,3 +1,4 @@
+import logging
 import time
 
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from seedsigner.models.decode_qr import DecodeQR
 from seedsigner.models.threads import BaseThread, ThreadsafeCounter
 
 from .screen import BaseScreen
+
+logger = logging.getLogger(__name__)
 
 
 def listed_int(value, allowed, default: int) -> int:
@@ -139,7 +142,12 @@ class ScanScreen(BaseScreen):
         current = self.camera.zoom
         zoom = steps[(steps.index(current) + 1) % len(steps)] if current in steps else steps[0]
         self.camera.set_zoom(zoom)
-        Settings.get_instance().set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, zoom)
+        try:
+            # Persistent Settings on: this also writes the SD card; a failing write (card
+            # pulled, read-only) must not abort the scan in progress
+            Settings.get_instance().set_value(SettingsConstants.SETTING__MAX_CAMERA_ZOOM, zoom)
+        except Exception as e:
+            logger.warning(f"Camera zoom not saved: {e}")
         return zoom
 
 

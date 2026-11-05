@@ -187,10 +187,12 @@ def test_long_passphrase_scrolls_vertically():
     display = screen.text_entry_display
     check(display.first_line == 1, f"130 characters, cursor at the end: lines 2-4 shown (first line {display.first_line + 1})")
     canvas = TestRenderer._instance.canvas
-    check(canvas.getpixel((display.rect[2] - 8, display.rect[1] + 5)) == (204, 204, 204), "mark: more text above")
+    check(canvas.getpixel((display.rect[2] - 4, display.rect[1] + 6)) == (204, 204, 204), "mark: more text above")
+    last_cell = (display.rect[0] + 8 + 39 * display.char_width, display.rect[1] + 2, display.rect[0] + 8 + 40 * display.char_width, display.rect[1] + 10)
+    check(lit_pixels(last_cell, lambda p: p == (204, 204, 204)) == 0, "the mark stays out of the 40th character's cell")
     run(screen, [key(screen, LEFT)] * 95)       # cursor at 35, on line 1
     check(display.first_line == 0 and display.cursor_position == 35, f"cursor back on line 1: first line shown {display.first_line + 1}, cursor {display.cursor_position}")
-    check(canvas.getpixel((display.rect[2] - 8, display.rect[3] - 5)) == (204, 204, 204), "mark: more text below")
+    check(canvas.getpixel((display.rect[2] - 4, display.rect[3] - 6)) == (204, 204, 204), "mark: more text below")
 
 
 def test_keyboard_switch_keeps_the_cursor():
@@ -206,6 +208,94 @@ def test_prefilled_passphrase():
     display = screen.text_entry_display
     check(display.cursor_position == len(screen.passphrase), "an existing passphrase opens with the cursor at the end")
     check(lit_pixels(line_rect(display, 1), is_orange) > 100, "and fills the second line")
+
+
+ALL_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" + """!@#$%&();:,.-+='"?""" + """^*[]{}_\\|<>/`~""" + " "
+
+
+class FieldDecoder:
+    """
+    Reads the passphrase field back from the canvas, pixel by pixel, with glyph
+    signatures rendered independently with the same font: an oracle that does not use
+    the display's own line/cursor math.
+    """
+    def __init__(self, display):
+        self.d = display
+        self.cell_h = display.line_height - 1
+        self.sigs = {}
+        cw, asc = display.char_width, display.ascent
+        for ch in ALL_CHARS:
+            img = Image.new("RGB", (cw * 3, self.cell_h), (44, 44, 44))
+            glyph = display.SPACE_MARK if ch == " " else ch
+            ImageDraw.Draw(img).text((cw, asc + 2), glyph, fill=(display.space_color if ch == " " else display.accent_color),
+                                     font=display.font, anchor="ls")
+            self.sigs[ch] = self.sig(img.crop((cw, 0, 2 * cw, self.cell_h)))
+        self.empty = tuple(0 for _ in range(cw * self.cell_h))
+
+    @staticmethod
+    def sig(img):
+        return tuple(1 if (p != (204, 204, 204) and abs(p[0] - 44) + abs(p[1] - 44) + abs(p[2] - 44) > 90) else 0
+                     for p in img.convert("RGB").getdata())
+
+    def read(self):
+        d = self.d
+        canvas = TestRenderer._instance.canvas
+        field = canvas.crop((d.rect[0], d.rect[1], d.rect[2] + 1, d.rect[3] + 1)).convert("RGB")
+        x0 = 8
+        lines, cursor = [], None
+        for row in range(d.num_lines):
+            top = d.LINE_GAP + row * d.line_height          # 2 px above the glyph box, as in the signatures
+            cell_img = field.crop((0, top, field.width, top + self.cell_h))
+            px = cell_img.load()
+            cursor_xs = {x for y in range(d.line_height - 2) for x in range(field.width - 16) if px[x, y] == (204, 204, 204)}
+            text = ""
+            for col in range(d.chars_per_line):
+                cx = x0 + col * d.char_width
+                s = self.sig(cell_img.crop((cx, 0, cx + d.char_width, self.cell_h)))
+                masked = [x - cx for x in cursor_xs if cx <= x < cx + d.char_width]
+                if masked:
+                    def m(sig):
+                        return tuple(0 if (i % d.char_width) in masked else v for i, v in enumerate(sig))
+                    s, sigs, empty = m(s), {c: m(v) for c, v in self.sigs.items()}, m(self.empty)
+                else:
+                    sigs, empty = self.sigs, self.empty
+                if s == empty:
+                    text += "\0"
+                    continue
+                hit = [c for c, v in sigs.items() if v == s]
+                text += hit[0] if hit else "?"
+            lines.append(text.rstrip("\0").replace("\0", "?"))
+            if cursor_xs:
+                cursor = (row, round((min(cursor_xs) + 1 - x0) / d.char_width))
+        return lines, cursor
+
+
+def test_field_decodes_back_to_the_model():
+    """ What is drawn equals the model (lines of 40, cursor row/col, window on the cursor) """
+    screen = new_screen()
+    display = screen.text_entry_display
+    decoder = FieldDecoder(display)
+    n = display.chars_per_line
+    problems = 0
+    cases = []
+    sample = "Correct horse  battery staple, il mio cane si chiama Fido 2026! ^*[]{}_|<>/`~ 0123456789 ABC xyz"
+    for length in (0, 1, 39, 40, 41, 79, 80, 81, 119, 120, 121, 160, 200):
+        text = (sample * 3)[:length]
+        for cursor in sorted({0, 1, min(39, length), min(40, length), min(41, length), min(80, length), length // 2, max(length - 1, 0), length}):
+            cases.append((text, cursor))
+    for text, cursor in cases:
+        cursor = min(cursor, len(text))
+        display.first_line = 0
+        display.render(text, cursor)
+        lines, got_cursor = decoder.read()
+        model_lines = [text[i:i + n] for i in range(0, len(text), n)] or [""]
+        cursor_line, cursor_col = divmod(cursor, n)
+        first = max(0, min(max(cursor_line - display.num_lines + 1, 0), max(len(model_lines), cursor_line + 1) - display.num_lines))
+        expected = [model_lines[i] if i < len(model_lines) else "" for i in range(first, first + display.num_lines)]
+        if lines != expected or got_cursor != (cursor_line - first, cursor_col):
+            problems += 1
+            print(f"  mismatch len={len(text)} cursor={cursor}: drawn {lines} cursor {got_cursor}; expected {expected} cursor {(cursor_line - first, cursor_col)}")
+    check(problems == 0, f"{len(cases)} renders decoded back from the pixels, {problems} mismatches")
 
 
 def test_standard_profile_unchanged():
@@ -227,6 +317,7 @@ if __name__ == "__main__":
     test_long_passphrase_scrolls_vertically()
     test_keyboard_switch_keeps_the_cursor()
     test_prefilled_passphrase()
+    test_field_decodes_back_to_the_model()
     test_standard_profile_unchanged()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

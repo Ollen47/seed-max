@@ -85,6 +85,8 @@ class BaseScreen(BaseComponent):
             with self.renderer.lock:
                 self._render()
                 self.renderer.show_image()
+            # SeedSigner Max: the guard's 400 ms count from the moment the frame is visible
+            self.hw_inputs.mark_screen_shown()
 
             for t in self.get_threads():
                 if not t.is_alive():
@@ -612,7 +614,10 @@ class ButtonListScreen(BaseTopNavScreen):
         try:
             from seedsigner.controller import Controller
             from seedsigner.gui.toast import InfoToast
-            Controller.get_instance().activate_toast(InfoToast(_("Hold to confirm"), duration=2))
+            hint = InfoToast(_("Hold to confirm"), duration=2)
+            # The hint covers the very button it asks the user to hold: let that press through
+            hint.toast.blocks_touches = False
+            Controller.get_instance().activate_toast(hint)
         except Exception as e:
             logger.info(f"Hold hint not shown: {e}")
 

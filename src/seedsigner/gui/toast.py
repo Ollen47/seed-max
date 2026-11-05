@@ -19,6 +19,11 @@ class ToastOverlay(BaseComponent):
     font_size: int = 19
     outline_thickness: int = 2  # pixels
 
+    # SeedSigner Max: a touch landing on the toast only dismisses it (see
+    # HardwareButtons.set_touch_blocked_rect). The "Hold to confirm" hint is the one
+    # exception: it invites the user to press the button it covers.
+    blocks_touches: bool = True
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -57,6 +62,11 @@ class ToastOverlay(BaseComponent):
         
         if self.icon_name:
             self.icon.screen_y = self.canvas_height - self.height + int((self.height - self.icon.height)/2)
+
+
+    def touch_rect(self):
+        """ SeedSigner Max: the band of the screen this toast covers (x1, y1, x2, y2) """
+        return (0, self.canvas_height - self.height, self.canvas_width, self.canvas_height)
 
 
     def render(self):
@@ -143,6 +153,8 @@ class BaseToastOverlayManagerThread(BaseThread):
                 return
             time.sleep(0.1)
 
+        has_rendered = False
+        blocks_touches = getattr(self.toast, "blocks_touches", True)
         try:
             # Hold onto the Renderer lock so we're guaranteed to restore the original
             # screen before any other listener can get a screen write in.
@@ -150,12 +162,16 @@ class BaseToastOverlayManagerThread(BaseThread):
             self.renderer.lock.acquire()
             logger.info(f"{self.__class__.__name__}: Lock acquired")
 
-            has_rendered = False
             previous_screen_state = None
             while self.keep_running and self.should_keep_running():
                 if self.hw_inputs.has_any_input():
                     # User has pressed a button, hide the toast
                     logger.info(f"{self.__class__.__name__}: Exiting due to user input")
+                    if has_rendered and blocks_touches:
+                        # SeedSigner Max: this thread sees the finger on PENIRQ before the
+                        # input loop has debounced it into a DOWN, so the band alone would
+                        # be cleared too early: swallow the whole gesture right now
+                        self.hw_inputs.guard_until_release()
                     break
 
                 if self._toggle_renderer_lock:
@@ -179,6 +195,9 @@ class BaseToastOverlayManagerThread(BaseThread):
                     logger.info(f"{self.__class__.__name__}: Showing toast")
                     self.toast.render()
                     has_rendered = True
+                    if blocks_touches:
+                        # SeedSigner Max: a tap on the toast must not reach what it covers
+                        self.hw_inputs.set_touch_blocked_rect(self.toast.touch_rect())
 
                 if time.time() - start > self.activation_delay + self.duration and has_rendered:
                     logger.info(f"{self.__class__.__name__}: Hiding toast")
@@ -193,6 +212,15 @@ class BaseToastOverlayManagerThread(BaseThread):
                 # As far as we know, we currently hold the Renderer.lock
                 self.renderer.show_image(previous_screen_state)
                 logger.info(f"{self.__class__.__name__}: restored previous screen state")
+                try:
+                    if blocks_touches and self.hw_inputs.has_any_input():
+                        # SeedSigner Max: stopped or replaced while a finger is on the
+                        # panel (and the toast was still visible a moment ago)
+                        self.hw_inputs.guard_until_release()
+                except Exception as e:
+                    # Never skip the cleanup below (and the lock release) for a GPIO read
+                    logger.exception(f"{self.__class__.__name__}: PENIRQ read failed: {e}")
+                self.hw_inputs.set_touch_blocked_rect(None)
 
             # We're done, release the lock
             self.renderer.lock.release()

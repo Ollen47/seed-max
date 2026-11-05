@@ -91,6 +91,11 @@ def parse_response(response: list[int], pressure_threshold: int) -> tuple[int, i
     below `pressure_threshold` (no touch, or too light to give a trustworthy position).
     """
     z1, z2, _, x1, x2, x3, _, y1, y2, y3 = decode_results(response)
+    if z2 <= z1:
+        # On a real contact Z1 is small and Z2 large (XPT2046 datasheet, pressure measurement). Z1 >= Z2 means the converter was not measuring a panel: a floating
+        # or clock-coupled MISO (0x55/0xAA patterns give Z1 == Z2) would otherwise read
+        # as the strongest possible press.
+        return None
     pressure = z1 + 4095 - z2
     if pressure < pressure_threshold:
         return None

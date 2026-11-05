@@ -142,6 +142,80 @@ def test_zones_match_the_drawing():
         previous_bottom = y2
 
 
+def drawn_word_rows(screen):
+    """
+    Independent of match_row_zones(): intercept the real draw.text() calls of
+    render_possible_matches() and return {word: set of screen rows with its pixels}.
+    """
+    import PIL.ImageDraw
+    original = PIL.ImageDraw.ImageDraw.text
+    calls = []
+
+    def record(self, xy, text, *args, **kwargs):
+        calls.append((xy, text, kwargs.get("font"), kwargs.get("anchor")))
+        return original(self, xy, text, *args, **kwargs)
+
+    PIL.ImageDraw.ImageDraw.text = record
+    try:
+        screen.render_possible_matches()
+    finally:
+        PIL.ImageDraw.ImageDraw.text = original
+    rows = {}
+    panel_width = screen.canvas_width - screen.matches_list_x
+    for xy, text, font, anchor in calls:
+        if font is not screen.word_font:
+            continue
+        img = Image.new("L", (panel_width, screen.canvas_height), 0)
+        ImageDraw.Draw(img).text(xy, text, fill=255, font=font, anchor=anchor)
+        img = img.crop((0, screen.top_nav.height, panel_width, screen.canvas_height))
+        px = img.load()
+        lit = {y + screen.top_nav.height for y in range(img.height) if any(px[x, y] > 100 for x in range(img.width))}
+        rows.setdefault(text, set()).update(lit)
+    return rows
+
+
+def test_zones_against_the_real_draw_calls():
+    """ Every zone covers only its own drawn word; every y in a zone chooses that word; dead bands do nothing """
+    problems = 0
+    checked = 0
+    for prefix in ("fo", "ab", "zo", "mush", "w"):
+        screen = new_screen()
+        screen.letters = list(prefix) + [" "]
+        screen.calc_possible_alphabet(new_letter=True)
+        words = screen.possible_words
+        for index in range(len(words)):
+            screen.selected_possible_words_index = index
+            rows = drawn_word_rows(screen)
+            x1, y1, x2, y2 = component_rect(screen.matches_list_highlight_button)
+            zones = screen.match_row_zones()
+            covered = set(range(y1 - screen.MATCH_HIGHLIGHT_TOUCH_MARGIN, y2 + screen.MATCH_HIGHLIGHT_TOUCH_MARGIN + 1))
+            for i, zy1, zy2 in zones:
+                checked += 1
+                own = {y for y in rows.get(words[i], set())}
+                if not own or not (zy1 <= min(own) and max(own) - 4 <= zy2):
+                    problems += 1
+                    print(f"  misaligned: {prefix!r} index {index} word {words[i]!r} zone {zy1}-{zy2} drawn {sorted(own)[:1]}-{sorted(own)[-1:]}")
+                for other, orows in rows.items():
+                    if other != words[i] and any(zy1 <= r <= zy2 for r in orows):
+                        problems += 1
+                        print(f"  overlap: {prefix!r} index {index} zone of {words[i]!r} touches {other!r}")
+                for y in (zy1, (zy1 + zy2) // 2, zy2):
+                    screen.selected_possible_words_index = index
+                    code = screen.touch_matches_list(tap(word_x(screen), y))
+                    if code != K.KEY2 or screen.selected_possible_words_index != i:
+                        problems += 1
+                        print(f"  tap: {prefix!r} index {index} y={y} expected word {i}, got {code} / {screen.selected_possible_words_index}")
+                covered.update(range(zy1, zy2 + 1))
+            for y in range(screen.top_nav.height, screen.canvas_height):
+                if y in covered:
+                    continue
+                screen.selected_possible_words_index = index
+                if screen.touch_matches_list(tap(word_x(screen), y)) is not None or screen.selected_possible_words_index != index:
+                    problems += 1
+                    print(f"  dead band acted: {prefix!r} index {index} y={y}")
+    check(checked > 100 and problems == 0, f"{checked} zones checked against the real draw calls, {problems} problems")
+
+
 def test_tap_a_word_below():
     for position, word in ((1, "focus"), (3, "foil"), (6, "food")):
         screen = new_screen()
@@ -218,6 +292,7 @@ def center(rect):
 
 if __name__ == "__main__":
     test_zones_match_the_drawing()
+    test_zones_against_the_real_draw_calls()
     test_tap_a_word_below()
     test_tap_a_word_above()
     test_tap_the_highlighted_word()

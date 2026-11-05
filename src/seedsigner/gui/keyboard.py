@@ -769,10 +769,12 @@ class MultiLineTextEntryDisplay(TextEntryDisplay):
                 bottom_y = baseline + 4
                 draw.line((cx, top_y, cx, bottom_y), fill="#ccc", width=2)
 
-        # More text above / below the visible lines: small marks on the right edge
+        # More text above / below the visible lines: small marks in the right padding
+        # (never over the last character of a line)
+        w = self.width
         if self.first_line > 0:
-            draw.polygon([(self.width - 8, 8), (self.width - 3, 3), (self.width - 13, 3)], fill="#ccc")
+            draw.polygon([(w - 4, 3), (w - 1, 8), (w - 7, 8)], fill="#ccc")
         if self.first_line + self.num_lines < len(lines):
-            draw.polygon([(self.width - 8, self.height - 3), (self.width - 3, self.height - 8), (self.width - 13, self.height - 8)], fill="#ccc")
+            draw.polygon([(w - 4, self.height - 3), (w - 1, self.height - 8), (w - 7, self.height - 8)], fill="#ccc")
 
         self.canvas.paste(image, (self.rect[0], self.rect[1]))

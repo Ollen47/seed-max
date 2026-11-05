@@ -184,16 +184,20 @@ class Controller(Singleton):
         controller.microsd = MicroSD.get_instance()
         controller.microsd.start_detection()
 
-        # SeedSigner Max: "Battery low" warnings from the carrier's comparator
-        from seedsigner.hardware.power import BatteryMonitor
-        BatteryMonitor.get_instance().start_monitoring()
-
         # Store one working psbt in memory
         controller.psbt = None
         controller.psbt_parser = None
 
         # Configure the Renderer
         Renderer.configure_instance()
+
+        # SeedSigner Max: the display and the touch controller claim their GPIO pins first;
+        # the battery monitor then bit-bangs I2C on GPIO 2/3 from its own thread, and
+        # RPi.GPIO's pin setup is a read-modify-write of shared registers
+        from seedsigner.hardware.buttons import HardwareButtons
+        HardwareButtons.get_instance()._get_touch_device()
+        from seedsigner.hardware.power import BatteryMonitor
+        BatteryMonitor.get_instance().start_monitoring()
 
         controller.back_stack = BackStack()
 

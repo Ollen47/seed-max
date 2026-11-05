@@ -3,7 +3,7 @@ from typing import Callable, List
 import RPi.GPIO as GPIO
 import time
 
-from seedsigner.hardware.touch import TouchEvent, TouchTracker
+from seedsigner.hardware.touch import TouchEvent, TouchTracker, rect_contains
 from seedsigner.models.singleton import Singleton
 
 logger = logging.getLogger(__name__)
@@ -15,6 +15,9 @@ class HardwareButtons(Singleton):
     HOLD_TO_CONFIRM_MS = 1000     # irreversible actions need the finger held this long
     HOLD_MARGIN_PX = 12           # the finger may wander this far outside the button while holding
     TOUCH_CODE_TTL_MS = 300       # touch codes kept for `check_for_low()` polling loops
+    TOUCH_QUIET_MS = 250          # after a release that ends the guard, the panel must stay empty this long
+    HOLD_PROGRESS_REDRAW_MS = 100 # the hold-to-confirm bar is redrawn at most this often (a frame costs ~100 ms)
+    TOUCH_READ_ERROR_LOG_EVERY = 100
 
     if GPIO.RPI_INFO['P1_REVISION'] == 3: #This indicates that we have revision 3 GPIO
         logger.info("Detected 40pin GPIO (Raspberry Pi 2 and above)")
@@ -83,6 +86,9 @@ class HardwareButtons(Singleton):
             cls._instance.touch_screen_started = 0
             cls._instance.touch_require_release = False
             cls._instance.touch_pending_codes = []
+            cls._instance.touch_last_contact_ms = 0    # last sample with a finger on the panel
+            cls._instance.touch_blocked_rect = None    # a toast is drawn here: touches landing on it are swallowed
+            cls._instance.touch_read_errors = 0
 
         return cls._instance
 
@@ -126,23 +132,80 @@ class HardwareButtons(Singleton):
         self.touch_pending_codes = []
 
 
+    def _read_touch(self, device):
+        """
+        One sample from the panel. A failing SPI transfer (a loose bus, a controller that
+        stopped answering) is read as "no finger" and logged, instead of aborting the
+        screen in progress: nothing can be pressed by mistake while the panel is unread.
+        """
+        try:
+            return device.read()
+        except Exception as e:
+            self.touch_read_errors += 1
+            if self.touch_read_errors == 1 or self.touch_read_errors % self.TOUCH_READ_ERROR_LOG_EVERY == 0:
+                logger.exception(f"Touch read failed ({self.touch_read_errors} so far): {e}")
+            return None
+
+
+    def mark_screen_shown(self):
+        """ Called once the new screen's first frame is on the display: the guard counts from here """
+        self.touch_screen_started = int(time.time() * 1000)
+
+
+    def guard_until_release(self):
+        """
+        Swallow the gesture in progress: nothing is accepted until the finger has been
+        lifted and the panel has stayed empty for TOUCH_QUIET_MS.
+        """
+        now = int(time.time() * 1000)
+        self.touch_require_release = True
+        self.touch_screen_started = now - self.INPUT_GUARD_MS
+        # The quiet period counts from now: PENIRQ (what the toast thread reads) goes
+        # low before the first pressure-valid sample, so a guard set from there must not
+        # end on the next empty sample
+        self.touch_last_contact_ms = now
+
+
+    def set_touch_blocked_rect(self, rect):
+        """
+        A toast is drawn over `rect` (x1, y1, x2, y2), or None when it is gone. A finger
+        landing on a toast only dismisses it: the control drawn underneath must not get
+        the tap. Called from the toast thread; read by `poll_touch()` on the main thread.
+        """
+        self.touch_blocked_rect = rect
+
+
     def poll_touch(self) -> List[TouchEvent]:
         """ Read the panel once and return the resulting touch events, after the guard """
         device = self._get_touch_device()
         if device is None:
             return []
 
-        point = device.read()
+        point = self._read_touch(device)
         now = int(time.time() * 1000)
         events = self.touch_tracker.feed(point, now)
         if point is not None:
             # A finger on the panel counts as activity (screensaver)
             self.last_input_time = now
+            self.touch_last_contact_ms = now
 
         if self.touch_require_release:
-            if now - self.touch_screen_started >= self.INPUT_GUARD_MS and point is None and not self.touch_tracker.is_pressed:
+            # The guard ends only after the finger has been lifted for a while: a finger
+            # resting on the panel across two screens flickers in and out of contact, and
+            # one 60 ms dropout must not count as "lifted" (it would let a hold start).
+            if (now - self.touch_screen_started >= self.INPUT_GUARD_MS and point is None
+                    and not self.touch_tracker.is_pressed
+                    and now - self.touch_last_contact_ms >= self.TOUCH_QUIET_MS):
                 self.touch_require_release = False
             return []
+
+        blocked = self.touch_blocked_rect
+        if blocked is not None:
+            for event in events:
+                if event.is_down and rect_contains(blocked, event.x, event.y):
+                    # Landed on a toast: dismiss only (the toast thread sees it on PENIRQ)
+                    self.guard_until_release()
+                    return []
 
         return events
 
@@ -166,30 +229,43 @@ class HardwareButtons(Singleton):
         is lifted or slides away. `progress_callback(progress)` gets 0.0-1.0 while it
         is held, and None when it was let go early, so the screen can draw a filling bar.
         """
-        from seedsigner.hardware.touch import rect_contains
         duration_ms = duration_ms or self.HOLD_TO_CONFIRM_MS
         callback = progress_callback or (lambda progress: None)
         device = self._get_touch_device()
         started = int(time.time() * 1000)
+        last_redraw = 0
+        redraw_cost = 0
         while True:
             now = int(time.time() * 1000)
-            point = device.read() if device else None
+            point = self._read_touch(device) if device else None
             self.touch_tracker.feed(point, now)
+            if point is not None:
+                self.touch_last_contact_ms = now
             position = self.touch_tracker.position
             if position is None or not rect_contains(rect, position[0], position[1], margin=self.HOLD_MARGIN_PX):
                 callback(None)
                 # Whatever the finger does next (still down and sliding, or the release
                 # itself) must not count as a tap somewhere else
-                self.touch_require_release = True
+                self.guard_until_release()
                 return False
 
             elapsed = now - started
-            callback(min(1.0, elapsed / duration_ms))
-            if elapsed >= duration_ms:
+            if elapsed >= duration_ms and point is not None:
+                # Confirmed only on a sample with the finger really there: the release
+                # debounce alone must not carry a finger lifted early over the line
+                callback(1.0)
                 # The next screen's guard waits for this finger to be lifted
-                self.touch_require_release = True
+                self.guard_until_release()
                 self.last_input_time = now
                 return True
+            if now - last_redraw >= self.HOLD_PROGRESS_REDRAW_MS and elapsed + redraw_cost < duration_ms:
+                # Redrawing is a full frame (~100 ms): do it at most 10 times a second so
+                # the panel is still sampled every 20 ms in between, and not at all when
+                # the frame would end past the finish line (the finger must be sampled
+                # right then, not after a blind frame)
+                callback(min(1.0, elapsed / duration_ms))
+                last_redraw = int(time.time() * 1000)
+                redraw_cost = last_redraw - now
             time.sleep(0.02)
 
 
