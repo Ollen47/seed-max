@@ -681,3 +681,98 @@ class TextEntryDisplay(TextEntryDisplayConstants):
         # Paste the display onto the main canvas
         self.canvas.paste(image, (self.rect[0], self.rect[1]))
 
+
+
+
+@dataclass
+class MultiLineTextEntryDisplay(TextEntryDisplay):
+    """
+    SeedSigner Max: the passphrase field on several lines, so a long passphrase can be
+    read without scrolling sideways.
+
+    The font is fixed-width, so the text is cut into lines of `chars_per_line`
+    characters exactly (by character, not by word: a passphrase is not prose, and word
+    wrap would hide spaces at the line ends). Every space is drawn as a dim middle dot,
+    so a space at the start or end of a line, or two in a row, can still be seen and
+    counted. If the text needs more than `num_lines` lines, the lines scroll vertically
+    to keep the cursor visible. Bar cursor only.
+    """
+    num_lines: int = 3
+    space_color: str = "#777"
+    SPACE_MARK = "·"
+    LINE_GAP = 4
+
+    def __post_init__(self):
+        super().__post_init__()
+        left, top, right, bottom = self.font.getbbox("X", anchor="ls")
+        self.char_width = int(self.font.getlength("X"))
+        self.ascent = -top
+        self.line_height = self.ascent + self.LINE_GAP + 4
+        self.chars_per_line = max(1, int((self.width - 2 * GUIConstants.COMPONENT_PADDING) / self.char_width))
+        self.first_line = 0
+        self.cursor_position = None    # last cursor drawn; None = after the last character
+
+
+    @classmethod
+    def height_for(cls, font_name: str, font_size: int, num_lines: int) -> int:
+        """ Pixel height of a field with `num_lines` lines of this font """
+        font = Fonts.get_font(font_name, font_size)
+        left, top, right, bottom = font.getbbox("X", anchor="ls")
+        return num_lines * (-top + cls.LINE_GAP + 4) + cls.LINE_GAP + 2
+
+
+    def cursor_line_col(self, cursor_position: int) -> tuple[int, int]:
+        """ (line, column) of the cursor: before character `cursor_position` """
+        return divmod(cursor_position, self.chars_per_line)
+
+
+    def render(self, cur_text=None, cursor_position=None):
+        if cur_text is not None:
+            self.cur_text = cur_text
+        text = self.cur_text or ""
+        if cursor_position is None:
+            # A plain redraw (e.g. after switching keyboards) keeps the cursor where it was
+            cursor_position = self.cursor_position if self.cursor_position is not None else len(text)
+        cursor_position = min(max(cursor_position, 0), len(text))
+        self.cursor_position = cursor_position
+
+        n = self.chars_per_line
+        lines = [text[i:i + n] for i in range(0, len(text), n)] or [""]
+        cursor_line, cursor_col = self.cursor_line_col(cursor_position)
+
+        # Keep the cursor line in view, moving the window as little as possible
+        if cursor_line < self.first_line:
+            self.first_line = cursor_line
+        elif cursor_line >= self.first_line + self.num_lines:
+            self.first_line = cursor_line - self.num_lines + 1
+        last_needed = max(len(lines), cursor_line + 1)
+        self.first_line = max(0, min(self.first_line, last_needed - self.num_lines))
+
+        image = Image.new("RGB", (self.width + 1, self.height + 1), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((0, 0, self.width, self.height), fill=self.background_color, radius=4)
+
+        x0 = GUIConstants.COMPONENT_PADDING
+        for row in range(self.num_lines):
+            index = self.first_line + row
+            baseline = self.LINE_GAP + 2 + row * self.line_height + self.ascent
+            if index < len(lines):
+                for col, char in enumerate(lines[index]):
+                    x = x0 + col * self.char_width
+                    if char == " ":
+                        draw.text((x, baseline), self.SPACE_MARK, fill=self.space_color, font=self.font, anchor="ls")
+                    else:
+                        draw.text((x, baseline), char, fill=self.accent_color, font=self.font, anchor="ls")
+            if index == cursor_line:
+                cx = x0 + cursor_col * self.char_width - 1
+                top_y = baseline - self.ascent - 2
+                bottom_y = baseline + 4
+                draw.line((cx, top_y, cx, bottom_y), fill="#ccc", width=2)
+
+        # More text above / below the visible lines: small marks on the right edge
+        if self.first_line > 0:
+            draw.polygon([(self.width - 8, 8), (self.width - 3, 3), (self.width - 13, 3)], fill="#ccc")
+        if self.first_line + self.num_lines < len(lines):
+            draw.polygon([(self.width - 8, self.height - 3), (self.width - 3, self.height - 8), (self.width - 13, self.height - 8)], fill="#ccc")
+
+        self.canvas.paste(image, (self.rect[0], self.rect[1]))

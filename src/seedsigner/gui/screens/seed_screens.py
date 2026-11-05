@@ -772,6 +772,10 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
     KEYBOARD__SYMBOLS_1_BUTTON_TEXT = "!@#"
     KEYBOARD__SYMBOLS_2_BUTTON_TEXT = "*[]"
 
+    # SeedSigner Max: lines and font size of the passphrase field (see __post_init__)
+    PASSPHRASE_LINES = 3
+    PASSPHRASE_FONT_SIZE = 20
+
 
     def __post_init__(self):
         self.title = _("BIP-39 Passphrase")
@@ -810,6 +814,15 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
         max_cols = 9
         text_entry_display_y = self.top_nav.height
         text_entry_display_height = 30
+
+        # SeedSigner Max: the passphrase on PASSPHRASE_LINES lines instead of one that
+        # scrolls sideways; the keyboard below gives up the height it needs
+        from seedsigner.hardware import hw_profile
+        self.multi_line_passphrase = hw_profile.is_max_profile()
+        if self.multi_line_passphrase:
+            from seedsigner.gui.keyboard import MultiLineTextEntryDisplay
+            text_entry_display_height = MultiLineTextEntryDisplay.height_for(
+                GUIConstants.FIXED_WIDTH_EMPHASIS_FONT_NAME, self.PASSPHRASE_FONT_SIZE, self.PASSPHRASE_LINES)
 
         keyboard_start_y = text_entry_display_y + text_entry_display_height + GUIConstants.COMPONENT_PADDING
         self.keyboard_abc = Keyboard(
@@ -915,18 +928,34 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
             render_now=False
         )
 
-        self.text_entry_display = TextEntryDisplay(
-            canvas=self.renderer.canvas,
-            rect=(
-                GUIConstants.EDGE_PADDING,
-                text_entry_display_y,
-                self.canvas_width - self.right_panel_buttons_width,
-                text_entry_display_y + text_entry_display_height
-            ),
-            cursor_mode=TextEntryDisplay.CURSOR_MODE__BAR,
-            is_centered=False,
-            cur_text=''.join(self.passphrase)
-        )
+        if self.multi_line_passphrase:
+            self.text_entry_display = MultiLineTextEntryDisplay(
+                canvas=self.renderer.canvas,
+                rect=(
+                    GUIConstants.EDGE_PADDING,
+                    text_entry_display_y,
+                    self.canvas_width - self.right_panel_buttons_width,
+                    text_entry_display_y + text_entry_display_height
+                ),
+                font_size=self.PASSPHRASE_FONT_SIZE,
+                num_lines=self.PASSPHRASE_LINES,
+                cursor_mode=TextEntryDisplay.CURSOR_MODE__BAR,
+                is_centered=False,
+                cur_text=''.join(self.passphrase)
+            )
+        else:
+            self.text_entry_display = TextEntryDisplay(
+                canvas=self.renderer.canvas,
+                rect=(
+                    GUIConstants.EDGE_PADDING,
+                    text_entry_display_y,
+                    self.canvas_width - self.right_panel_buttons_width,
+                    text_entry_display_y + text_entry_display_height
+                ),
+                cursor_mode=TextEntryDisplay.CURSOR_MODE__BAR,
+                is_centered=False,
+                cur_text=''.join(self.passphrase)
+            )
 
         # Nudge the buttons off the right edge w/padding
         hw_button_x = self.canvas_width - self.right_panel_buttons_width + GUIConstants.COMPONENT_PADDING
