@@ -251,11 +251,75 @@ class SeedMnemonicEntryScreen(BaseTopNavScreen):
         self.renderer.show_image()
 
 
+    # SeedSigner Max: touch zones of the candidate words. A tap counts for a word only
+    # within MATCH_TOUCH_HALF_HEIGHT px of the middle of its row (rows are
+    # `matches_list_row_height` = 23 px apart on the Max), so a tap on the boundary
+    # between two words is ignored instead of choosing the neighbor. The highlighted
+    # word keeps its button, grown by MATCH_HIGHLIGHT_TOUCH_MARGIN px.
+    MATCH_TOUCH_HALF_HEIGHT = 8
+    MATCH_HIGHLIGHT_TOUCH_MARGIN = 4
+    MATCH_ARROW_TOUCH_MARGIN = 4
+
+    def match_row_zones(self) -> list[tuple[int, int, int]]:
+        """
+        SeedSigner Max: (word index, y1, y2) of every candidate word drawn on screen
+        except the highlighted one, with its touch zone. The rows are computed exactly as
+        `render_possible_matches()` draws them: the highlighted word in row 3 of 11, the
+        others baseline-anchored ("ls") at `cur_y`; rows hidden under the top nav or below
+        the bottom edge are left out.
+        """
+        highlighted_row = 3
+        num_possible_rows = 11
+        zones = []
+        list_starting_index = self.selected_possible_words_index - highlighted_row
+        for row, i in enumerate(range(list_starting_index, list_starting_index + num_possible_rows)):
+            if i < 0 or row == highlighted_row:
+                continue
+            if i >= len(self.possible_words):
+                break
+            if row < highlighted_row:
+                baseline = self.highlighted_row_y - GUIConstants.COMPONENT_PADDING - (highlighted_row - row - 1) * self.matches_list_row_height
+            else:
+                baseline = self.highlighted_row_y + self.matches_list_highlight_button.height + (row - highlighted_row) * self.matches_list_row_height
+            top = baseline - self.word_font_height
+            if top < self.top_nav.height or baseline > self.canvas_height:
+                continue
+            middle = baseline - self.word_font_height / 2
+            zones.append((i, int(middle - self.MATCH_TOUCH_HALF_HEIGHT), int(middle + self.MATCH_TOUCH_HALF_HEIGHT)))
+        return zones
+
+
+    def touch_matches_list(self, event: TouchEvent):
+        """
+        SeedSigner Max: a tap on the column of candidate words (0022).
+        - the up/down arrows scroll the list by one word (KEY1 / KEY3), as before;
+        - the highlighted word, or any other word shown, is chosen at once (KEY2, after
+          moving the selection onto the tapped word): one tap, the word the user sees;
+        - anything else (the boundary between two words, empty space) is ignored.
+        """
+        if rect_contains(component_rect(self.matches_list_up_button), event.x, event.y, margin=self.MATCH_ARROW_TOUCH_MARGIN):
+            return HardwareButtonsConstants.KEY1
+        if rect_contains(component_rect(self.matches_list_down_button), event.x, event.y, margin=self.MATCH_ARROW_TOUCH_MARGIN):
+            return HardwareButtonsConstants.KEY3
+
+        x1, y1, x2, y2 = component_rect(self.matches_list_highlight_button)
+        if y1 - self.MATCH_HIGHLIGHT_TOUCH_MARGIN <= event.y <= y2 + self.MATCH_HIGHLIGHT_TOUCH_MARGIN:
+            return HardwareButtonsConstants.KEY2
+
+        for index, zone_y1, zone_y2 in self.match_row_zones():
+            if zone_y1 <= event.y <= zone_y2:
+                # `_run()` takes `possible_words[selected_possible_words_index]` on KEY2
+                # and plays the usual "word stored" animation with it
+                self.selected_possible_words_index = index
+                return HardwareButtonsConstants.KEY2
+        return None
+
+
     def handle_touch(self, event: TouchEvent):
         """
         SeedSigner Max: tap a letter to type it (only letters that can still lead to a
-        BIP-39 word are active), DEL to delete. The candidate words on the right: tap
-        the highlighted word to choose it, above/below it (or drag) to scroll the list.
+        BIP-39 word are active), DEL to delete. The candidate words on the right: tap a
+        word to choose it, the arrows (or drag) to scroll the list.
         """
         if event.is_tap and self.is_back_touch(event.x, event.y):
             with self.renderer.lock:
@@ -272,12 +336,7 @@ class SeedMnemonicEntryScreen(BaseTopNavScreen):
                 # Finger up shows the words further down the list, like KEY3
                 return HardwareButtonsConstants.KEY3 if event.direction == TouchEvent.SWIPE__UP else HardwareButtonsConstants.KEY1
             if event.is_tap:
-                x1, y1, x2, y2 = component_rect(self.matches_list_highlight_button)
-                if event.y < y1 - GUIConstants.COMPONENT_PADDING:
-                    return HardwareButtonsConstants.KEY1
-                if event.y > y2 + GUIConstants.COMPONENT_PADDING:
-                    return HardwareButtonsConstants.KEY3
-                return HardwareButtonsConstants.KEY2
+                return self.touch_matches_list(event)
             return None
 
         if not event.is_tap:
