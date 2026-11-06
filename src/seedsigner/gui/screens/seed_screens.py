@@ -1378,6 +1378,10 @@ class SeedTranscribeSeedQRZoomedInScreen(BaseScreen):
     initial_zone_x: int = 0
     initial_zone_y: int = 0
 
+    # SeedSigner Max: extra pixels around the "click to exit" label that still count as a
+    # tap on it (resistive touch is a few pixels off).
+    EXIT_TOUCH_MARGIN = 12
+
     def __post_init__(self):
         super().__post_init__()
 
@@ -1438,13 +1442,15 @@ class SeedTranscribeSeedQRZoomedInScreen(BaseScreen):
         (left, top, right, bottom) = font.getbbox(msg, anchor="ls")
         msg_height = -1 * top + GUIConstants.COMPONENT_PADDING
         msg_width = right + 2*GUIConstants.COMPONENT_PADDING
+        # SeedSigner Max: remember where the label is so a tap on it exits.
+        self.exit_label_rect = (
+            int((self.canvas_width - msg_width)/2),
+            self.canvas_height - msg_height,
+            int((self.canvas_width + msg_width)/2),
+            self.canvas_height
+        )
         zone_mask_draw.rectangle(
-            (
-                int((self.canvas_width - msg_width)/2),
-                self.canvas_height - msg_height,
-                int((self.canvas_width + msg_width)/2),
-                self.canvas_height
-            ),
+            self.exit_label_rect,
             fill=GUIConstants.BACKGROUND_COLOR,
         )
         zone_mask_draw.text(
@@ -1517,10 +1523,13 @@ class SeedTranscribeSeedQRZoomedInScreen(BaseScreen):
     def handle_touch(self, event: TouchEvent):
         """
         SeedSigner Max: the screen works as a d-pad. Tap near an edge to move one zone
-        that way, tap the middle to leave.
+        that way; tap the middle or the "click to exit" label to leave. The label sits
+        inside the bottom (DOWN) band, so it is checked first.
         """
         if not event.is_tap:
             return None
+        if rect_contains(self.exit_label_rect, event.x, event.y, margin=self.EXIT_TOUCH_MARGIN):
+            return HardwareButtonsConstants.KEY_PRESS
         if event.x < self.canvas_width / 4:
             return HardwareButtonsConstants.KEY_LEFT
         if event.x > self.canvas_width * 3 / 4:
