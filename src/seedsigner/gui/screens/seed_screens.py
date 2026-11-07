@@ -1547,25 +1547,39 @@ class SeedTranscribeSeedQRZoomedInScreen(BaseScreen):
         )
 
 
+    def zone_hole_rect(self):
+        """ The highlighted zone in the middle of the screen (the hole in the mask) """
+        return (
+            self.zone_mask_offset_x,
+            self.zone_mask_offset_y,
+            self.canvas_width - self.zone_mask_offset_x,
+            self.canvas_height - self.zone_mask_offset_y,
+        )
+
+
     def handle_touch(self, event: TouchEvent):
         """
-        SeedSigner Max: the screen works as a d-pad. Tap near an edge to move one zone
-        that way; tap the middle or the "click to exit" label to leave. The label sits
-        inside the bottom (DOWN) band, so it is checked first.
+        SeedSigner Max: the screen works as a d-pad.
+        - A tap on the "click to exit" label (with a small margin) leaves the screen.
+          It is the only way out: before 0029 the whole middle of the screen (240x160 px)
+          exited too, and on 25x25/29x29 codes, where the highlighted zone is only
+          120 px, a tap just outside the zone meant to pan quit the backup instead.
+        - A tap inside the highlighted zone does nothing (the user is reading it).
+        - Any other tap pans one zone towards the nearest side, split along the screen
+          diagonals, so there is no band where a tap is lost or exits.
         """
         if not event.is_tap:
             return None
         if rect_contains(self.exit_label_rect, event.x, event.y, margin=self.EXIT_TOUCH_MARGIN):
             return HardwareButtonsConstants.KEY_PRESS
-        if event.x < self.canvas_width / 4:
-            return HardwareButtonsConstants.KEY_LEFT
-        if event.x > self.canvas_width * 3 / 4:
-            return HardwareButtonsConstants.KEY_RIGHT
-        if event.y < self.canvas_height / 4:
-            return HardwareButtonsConstants.KEY_UP
-        if event.y > self.canvas_height * 3 / 4:
-            return HardwareButtonsConstants.KEY_DOWN
-        return HardwareButtonsConstants.KEY_PRESS
+        if rect_contains(self.zone_hole_rect(), event.x, event.y):
+            return None
+        # Offset from the centre, scaled so the screen corners lie on the diagonals
+        dx = (event.x - self.canvas_width / 2) / (self.canvas_width / 2)
+        dy = (event.y - self.canvas_height / 2) / (self.canvas_height / 2)
+        if abs(dx) >= abs(dy):
+            return HardwareButtonsConstants.KEY_LEFT if dx < 0 else HardwareButtonsConstants.KEY_RIGHT
+        return HardwareButtonsConstants.KEY_UP if dy < 0 else HardwareButtonsConstants.KEY_DOWN
 
 
     def _run(self):
