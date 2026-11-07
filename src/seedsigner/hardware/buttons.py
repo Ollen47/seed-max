@@ -16,7 +16,10 @@ class HardwareButtons(Singleton):
     HOLD_MARGIN_PX = 12           # the finger may wander this far outside the button while holding
     TOUCH_CODE_TTL_MS = 300       # touch codes kept for `check_for_low()` polling loops
     TOUCH_QUIET_MS = 250          # after a release that ends the guard, the panel must stay empty this long
-    HOLD_PROGRESS_REDRAW_MS = 100 # the hold-to-confirm bar is redrawn at most this often (a frame costs ~100 ms)
+    HOLD_PROGRESS_REDRAW_MS = 100 # the hold-to-confirm bar is redrawn at most this often
+    HOLD_MAX_BLIND_MS = 40        # 0027: a bar redraw slower than this: no more redraws in that hold
+    HOLD_MAX_SAMPLE_GAP_MS = 60   # 0027: the panel unread this long (= TouchTracker.RELEASE_MS, the
+                                  # shortest lift) could hide a lift: the hold count starts over
     TOUCH_READ_ERROR_LOG_EVERY = 100
 
     if GPIO.RPI_INFO['P1_REVISION'] == 3: #This indicates that we have revision 3 GPIO
@@ -227,34 +230,59 @@ class HardwareButtons(Singleton):
         return codes
 
 
-    def track_touch_hold(self, rect: tuple, duration_ms: int = None, progress_callback: Callable = None) -> bool:
+    def track_touch_hold(self, rect: tuple, duration_ms: int = None, progress_callback: Callable = None,
+                         margin: int = None) -> bool:
         """
         The finger just landed on a button that needs a hold (an irreversible action):
         returns True once it has stayed on `rect` for `duration_ms`, False as soon as it
         is lifted or slides away. `progress_callback(progress)` gets 0.0-1.0 while it
         is held, and None when it was let go early, so the screen can draw a filling bar.
+
+        `margin`: how far outside `rect` the finger may wander (HOLD_MARGIN_PX if None).
+        A screen with other buttons next to this one passes a `rect` already clipped so
+        the margin never reaches into them, and margin=0 (0027).
+
+        A lift is what TouchTracker calls a release (RELEASE_SAMPLES empty samples over
+        at least RELEASE_MS: shorter dropouts are the resistive panel's flicker). It can
+        only be seen if the panel is read often enough, so (0027) any stretch of
+        HOLD_MAX_SAMPLE_GAP_MS or more between two reads, whatever kept the panel unread
+        (a bar redraw, a slow read, the scheduler), restarts the count from that read on;
+        a bar redraw slower than HOLD_MAX_BLIND_MS also turns redraws off for the rest of
+        the hold. The count runs on the monotonic clock: a clock step can't shorten it.
         """
         duration_ms = duration_ms or self.HOLD_TO_CONFIRM_MS
         callback = progress_callback or (lambda progress: None)
+        margin = self.HOLD_MARGIN_PX if margin is None else margin
         device = self._get_touch_device()
-        started = int(time.time() * 1000)
-        last_redraw = 0
+
+        def mono_ms():
+            return int(time.monotonic() * 1000)
+
+        started = mono_ms()
+        previous_read = started
+        last_redraw = None
         redraw_cost = 0
+        redraws = True
         while True:
-            now = int(time.time() * 1000)
+            read_at = mono_ms()
+            if read_at - previous_read >= self.HOLD_MAX_SAMPLE_GAP_MS:
+                # The panel went unread long enough to hide a lift: count again from here
+                started = read_at
+            previous_read = read_at
             point = self._read_touch(device) if device else None
+            now = int(time.time() * 1000)      # the tracker and the guard keep wall-clock ms
             self.touch_tracker.feed(point, now)
             if point is not None:
                 self.touch_last_contact_ms = now
             position = self.touch_tracker.position
-            if position is None or not rect_contains(rect, position[0], position[1], margin=self.HOLD_MARGIN_PX):
+            if position is None or not rect_contains(rect, position[0], position[1], margin=margin):
                 callback(None)
                 # Whatever the finger does next (still down and sliding, or the release
                 # itself) must not count as a tap somewhere else
                 self.guard_until_release()
                 return False
 
-            elapsed = now - started
+            elapsed = read_at - started
             if elapsed >= duration_ms and point is not None:
                 # Confirmed only on a sample with the finger really there: the release
                 # debounce alone must not carry a finger lifted early over the line
@@ -263,14 +291,21 @@ class HardwareButtons(Singleton):
                 self.guard_until_release()
                 self.last_input_time = now
                 return True
-            if now - last_redraw >= self.HOLD_PROGRESS_REDRAW_MS and elapsed + redraw_cost < duration_ms:
-                # Redrawing is a full frame (~100 ms): do it at most 10 times a second so
-                # the panel is still sampled every 20 ms in between, and not at all when
-                # the frame would end past the finish line (the finger must be sampled
-                # right then, not after a blind frame)
+            if (redraws and (last_redraw is None or read_at - last_redraw >= self.HOLD_PROGRESS_REDRAW_MS)
+                    and elapsed + redraw_cost < duration_ms):
+                # The panel isn't read while the bar is redrawn: the screen redraws just the
+                # button's strip (~15 ms on the Pi Zero, 0027), and skips a redraw rather
+                # than wait for a display busy with something else; never when the redraw
+                # would end past the finish line (the finger must be read right then)
                 callback(min(1.0, elapsed / duration_ms))
-                last_redraw = int(time.time() * 1000)
-                redraw_cost = last_redraw - now
+                last_redraw = mono_ms()
+                redraw_cost = last_redraw - read_at
+                if redraw_cost > self.HOLD_MAX_BLIND_MS:
+                    # Too slow for this display: no more redraws in this hold (the gap
+                    # check above restarts the count after this one if it was too long)
+                    redraws = False
+                # Read again right away: the redraw already kept the panel unread
+                continue
             time.sleep(0.02)
 
 

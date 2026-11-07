@@ -52,6 +52,17 @@ class DummyDisp:
         if self.frame_ms:
             time.sleep(self.frame_ms / 1000)
 
+    def show_rows(self, img, y1, y2):
+        """ 0027: a partial update costs its share of a full frame """
+        self.frames += 1
+        if self.frame_ms:
+            time.sleep(self.frame_ms / 1000 * (y2 - y1 + 1) / self.height)
+
+
+class DummyDispNoRows(DummyDisp):
+    """ A driver without partial updates: every redraw is a full (blind) frame """
+    show_rows = None
+
     def invert(self, *a):
         pass
 
@@ -90,9 +101,10 @@ class FakeTouch:
         self.script, self.t0 = list(script), None
 
     def _point(self):
+        # Monotonic: a test that steps the wall clock must not move the script (0027)
         if self.t0 is None:
-            self.t0 = time.time()
-        elapsed = time.time() - self.t0
+            self.t0 = time.monotonic()
+        elapsed = time.monotonic() - self.t0
         for duration, point in self.script:
             if elapsed < duration:
                 return point
@@ -114,7 +126,7 @@ class LeadingIrqTouch(FakeTouch):
 
     def read(self):
         if self.t0 is None:
-            self.t0 = time.time()
+            self.t0 = time.monotonic()
         saved = self.t0
         self.t0 = saved + self.lead
         try:
@@ -238,6 +250,211 @@ def test_hold_needs_contact_at_the_end():
     for k in range(4):
         scenario(f"100 ms frames, finger down {1.0 + k * 0.023:.3f} s: ignored", finalize_screen,
                  [(0.7, None), (1.0 + k * 0.023, APPROVE), (5, None)], "TIMEOUT", timeout=3.0, frame_ms=100)
+
+
+# --- 0027 ------------------------------------------------------------------------------
+def change_screen():
+    from seedsigner.gui.screens.psbt_screens import PSBTChangeDetailsScreen
+    from seedsigner.views.psbt_views import PSBTChangeDetailsView
+    return PSBTChangeDetailsScreen(
+        title="Your Change",
+        button_data=[PSBTChangeDetailsView.VERIFY_MULTISIG, PSBTChangeDetailsView.SKIP_VERIFICATION],
+        address="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount=10_000, is_multisig=True,
+        fingerprint="73c5da0a", derivation_path="m/48h/0h/0h/2h/1/0",
+        is_change_derivation_path=True, derivation_path_addr_index=0, is_change_addr_verified=False)
+
+
+def test_hold_cannot_count_on_a_neighbor_button():
+    """
+    0027, found by the adversarial review of v5.5: on "Your Change" a press that lands on
+    "Skip verification" (it needs a hold) and then rests on the bottom of "Verify", right
+    above it, kept counting inside the 12 px hold margin and skipped the check after 1 s.
+    The margin now never reaches into another button.
+    """
+    screen = change_screen()
+    verify = component_rect(screen.buttons[0])
+    skip = component_rect(screen.buttons[1])
+    check(verify[3] < skip[1], f"'Verify' {verify} sits right above 'Skip verification' {skip}")
+    hold = screen.hold_rect(1)
+    check(hold[1] > verify[3], f"Skip's hold area {hold} doesn't reach into Verify {verify}")
+    check(hold[1] <= skip[1] and hold[3] >= skip[3], "and still covers the whole Skip button")
+    sx, sy = center(skip)
+    for landing_dy in (2, 5, 8):
+        for rest_y in (verify[3] - 1, verify[3] - 4, verify[3] - 7):
+            scenario(f"lands on Skip (+{landing_dy}), rests on Verify y={rest_y} 1.3 s: not skipped", change_screen,
+                     [(0.7, None), (0.04, (sx, skip[1] + landing_dy)), (1.3, (sx, rest_y)), (5, None)],
+                     "TIMEOUT", timeout=3.5)
+    scenario("held 1.3 s on Skip: skipped (the hold itself still works)", change_screen,
+             [(0.7, None), (1.3, (sx, sy)), (5, None)], 1, timeout=3.5)
+    scenario("held 1.3 s on Skip, wandering 8 px below it: skipped", change_screen,
+             [(0.7, None), (0.4, (sx, sy)), (0.9, (sx, skip[3] + 8)), (5, None)], 1, timeout=3.5)
+    scenario("tap on Verify: verified", change_screen,
+             [(0.7, None), (0.12, center(verify)), (5, None)], 0, timeout=3.0)
+
+
+def test_a_lift_during_a_redraw_is_seen():
+    """
+    0027, found by the adversarial review of v5.5: the panel isn't read while the hold
+    bar is redrawn, and a full frame takes ~100 ms on the Pi Zero, so a lift of up to
+    ~160 ms falling in it went unseen. The bar now redraws only the button's rows, a
+    stretch of RELEASE_MS without the finger always ends the hold, and a redraw slower
+    than HOLD_MAX_BLIND_MS restarts the count with no more redraws.
+    """
+    # A lift is what the tracker calls a release (>= 60 ms from the first empty read);
+    # shorter dropouts are flicker and tolerated, as everywhere else
+    for first in (0.25, 0.30, 0.35, 0.45):
+        for gap in (0.10, 0.14, 0.16, 0.20):
+            scenario(f"100 ms frames: held {first:.2f} s, lifted {gap * 1000:.0f} ms, held 0.9 s: ignored",
+                     finalize_screen, [(0.7, None), (first, APPROVE), (gap, None), (0.9, APPROVE), (5, None)],
+                     "TIMEOUT", timeout=3.5, frame_ms=100)
+    scenario("100 ms frames: held 1.3 s: approved", finalize_screen,
+             [(0.7, None), (1.3, APPROVE), (5, None)], 0, timeout=3.5, frame_ms=100)
+
+    def no_rows(screen):
+        global renderer
+        frame_ms = renderer.disp.frame_ms
+        renderer.disp = DummyDispNoRows(frame_ms)
+    scenario("driver without partial updates, 100 ms frames: held 0.30 s, lifted 140 ms, held 0.9 s: ignored",
+             finalize_screen, [(0.7, None), (0.30, APPROVE), (0.14, None), (0.9, APPROVE), (5, None)],
+             "TIMEOUT", timeout=3.5, frame_ms=100, before=no_rows)
+    scenario("driver without partial updates, 100 ms frames: held 1.6 s: approved (count restarted once)",
+             finalize_screen, [(0.7, None), (1.6, APPROVE), (5, None)], 0, timeout=4.0, frame_ms=100, before=no_rows)
+
+
+def test_unread_stretches_restart_the_hold():
+    """
+    0027 (second review): any stretch with the panel unread for HOLD_MAX_SAMPLE_GAP_MS or
+    more, not only a bar redraw, restarts the count: here one read stalls 150 ms and a
+    lift of 120 ms falls inside the stall.
+    """
+    def stall_once(at_s, stall_s):
+        def before(screen):
+            device = hw.touch_device
+            original = device.read
+            t0 = time.monotonic()
+            done = []
+
+            def read():
+                if not done and time.monotonic() - t0 >= at_s:
+                    done.append(1)
+                    time.sleep(stall_s)
+                return original()
+            device.read = read
+        return before
+    for at in (1.05, 1.15, 1.30):
+        scenario(f"read stalls 150 ms at {at:.2f} s with a 120 ms lift inside: ignored", finalize_screen,
+                 [(0.7, None), (at - 0.7 + 0.01, APPROVE), (0.12, None), (0.75, APPROVE), (5, None)],
+                 "TIMEOUT", timeout=3.5, before=stall_once(at, 0.15))
+    scenario("read stalls 150 ms, finger down throughout, held 1.6 s: approved (count restarted)", finalize_screen,
+             [(0.7, None), (1.6, APPROVE), (5, None)], 0, timeout=4.0, before=stall_once(1.1, 0.15))
+
+
+def test_wall_clock_step_does_not_shorten_the_hold():
+    """ 0027 (second review): the hold runs on the monotonic clock """
+    def step_clock(after_s, step_s):
+        def before(screen):
+            real = time.time
+            t0 = real()
+
+            def stepped():
+                now = real()
+                return now + step_s if now - t0 >= after_s else now
+            time.time = stepped
+        return before
+    for step in (1.5, 3600):
+        scenario(f"wall clock +{step} s during a 300 ms press: ignored", finalize_screen,
+                 [(0.7, None), (0.3, APPROVE), (5, None)], "TIMEOUT", timeout=3.0, before=step_clock(0.85, step))
+    scenario("wall clock -30 s during a 1.3 s hold: approved", finalize_screen,
+             [(0.7, None), (1.3, APPROVE), (5, None)], 0, timeout=3.5, before=step_clock(1.0, -30))
+
+
+def test_flicker_is_tolerated_in_a_hold():
+    """
+    0027 must not make genuine holds flaky: realistic resistive dropouts (one empty read
+    of 10-40 ms every 150 ms) during a 1.4 s hold, with partial redraws costing 13 ms
+    (100 ms frames) or 26 ms (200 ms frames)
+    """
+    for frame_ms in (100, 200):
+        for dropout in (0.01, 0.025, 0.04):
+            script = [(0.7, None)]
+            for _ in range(9):
+                script += [(0.15, APPROVE), (dropout, None)]
+            script += [(0.3, APPROVE), (5, None)]
+            scenario(f"{frame_ms} ms frames, {dropout * 1000:.0f} ms dropouts every 150 ms: approved",
+                     finalize_screen, script, 0, timeout=4.5, frame_ms=frame_ms)
+
+
+def xpub_screen():
+    from seedsigner.gui.screens.seed_screens import SeedExportXpubDetailsScreen
+    return SeedExportXpubDetailsScreen(fingerprint="73c5da0a", xpub="zpub6rFR7y4Q2AijBEqTUquhVz398htDFrtymD9xYYfG1m4wAcvPhXNfE3EfH1r1ADqtfSdVCToUG868RvUUkgDKf31mGDtKsAYz2oz2AGutZYs")
+
+
+def test_export_xpub_bar_moves_while_the_edges_animate():
+    """
+    0027 (second review): the xpub screen's warning edges redraw the whole screen under
+    the renderer lock; a bar step waiting for it made the hold restart with a frozen bar.
+    A step now never waits: the bar moves and a 1.3 s hold exports.
+    """
+    steps = []
+
+    def spy(screen):
+        original = screen._render_hold_progress
+
+        def recorder(progress):
+            steps.append(progress)
+            original(progress)
+        screen._render_hold_progress = recorder
+
+    pid = os.fork()
+    if pid == 0:
+        renderer.disp.frame_ms = 100
+        install_touch([(0.7, None), (1.3, None), (5, None)])
+        screen = xpub_screen()
+        button = center(component_rect(screen.buttons[0]))
+        install_touch([(0.7, None), (1.3, button), (5, None)])
+        spy(screen)
+        result = run_with_timeout(screen, 3.5)
+        moving = [p for p in steps if p is not None and 0 < p < 1]
+        ok = result == 0 and len(moving) >= 3
+        print(("ok    " if ok else "FAIL  ") + f"xpub, 100 ms frames, edges animating, held 1.3 s: {result!r}, bar steps {[round(p, 2) for p in moving]}", flush=True)
+        os._exit(0 if ok else 1)
+    _, status = os.waitpid(pid, 0)
+    if os.WEXITSTATUS(status) != 0:
+        failures.append("xpub bar moves while the edges animate")
+
+
+def test_gap_between_buttons_belongs_to_the_tap_owner():
+    """ 0027 (second review): the 4 px gap above Skip is Verify's for taps; now for holds too """
+    screen = change_screen()
+    verify = component_rect(screen.buttons[0])
+    skip = component_rect(screen.buttons[1])
+    gap_ys = range(verify[3] + 1, skip[1])
+    owners = {y: screen.button_index_at((skip[0] + skip[2]) // 2, y) for y in gap_ys}
+    hold = screen.hold_rect(1)
+    in_hold = [y for y in gap_ys if hold[1] <= y <= hold[3]]
+    tap_owned_by_skip = [y for y, owner in owners.items() if owner == 1]
+    check(in_hold == tap_owned_by_skip, f"gap rows in Skip's hold area {in_hold} = gap rows a tap gives to Skip {tap_owned_by_skip}")
+
+
+def test_hold_bar_redraws_only_the_button_rows():
+    """ 0027: the hold bar goes out as a partial update of the button's rows """
+    calls = []
+
+    class Recorder(DummyDisp):
+        def show_rows(self, img, y1, y2):
+            calls.append((y1, y2))
+
+    saved = renderer.disp
+    renderer.disp = Recorder()
+    try:
+        screen = finalize_screen()
+        screen.selected_button = 0
+        screen._render_hold_progress(0.5)
+        screen._render_hold_progress(None)
+    finally:
+        renderer.disp = saved
+    x1, y1, x2, y2 = component_rect(screen.buttons[0])
+    check(calls == [(y1, y2), (y1, y2)], f"two partial updates of rows {y1}..{y2}: {calls}")
 
 
 def toast_after(delay, duration=5):
@@ -418,5 +635,13 @@ if __name__ == "__main__":
     test_hold_needs_contact_at_the_end()
     test_toast_tap_is_swallowed()
     test_toast_tap_on_seed_word_list_is_swallowed()
+    test_hold_cannot_count_on_a_neighbor_button()
+    test_a_lift_during_a_redraw_is_seen()
+    test_hold_bar_redraws_only_the_button_rows()
+    test_unread_stretches_restart_the_hold()
+    test_wall_clock_step_does_not_shorten_the_hold()
+    test_flicker_is_tolerated_in_a_hold()
+    test_export_xpub_bar_moves_while_the_edges_animate()
+    test_gap_between_buttons_belongs_to_the_tap_owner()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

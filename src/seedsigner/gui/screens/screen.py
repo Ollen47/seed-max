@@ -595,18 +595,29 @@ class ButtonListScreen(BaseTopNavScreen):
         0.0-1.0), or restore the button when the finger is lifted early.
         """
         button = self.buttons[self.selected_button]
-        with self.renderer.lock:
+        if progress is not None and progress < 1.0:
+            # 0027: the touch panel isn't read while this runs, so a progress step never
+            # waits for a display busy with something else (e.g. the warning edges
+            # animation): it is simply skipped, the next one comes 100 ms later
+            if not self.renderer.lock.acquire(timeout=0.005):
+                return
+        else:
+            self.renderer.lock.acquire()
+        try:
             button.render()
+            x1, y1, x2, y2 = component_rect(button)
             if progress is not None:
                 # Green, to stand out on the orange of the selected button
                 bar_height = 6
-                x1, _, x2, y2 = component_rect(button)
                 self.image_draw.rounded_rectangle(
                     (x1, y2 - bar_height, x1 + max(int((x2 - x1) * progress), 2 * bar_height), y2),
                     radius=3,
                     fill=GUIConstants.SUCCESS_COLOR,
                 )
-            self.renderer.show_image()
+            # Only the button's rows (0027): the touch panel isn't read while they're sent
+            self.renderer.show_rows(y1, y2)
+        finally:
+            self.renderer.lock.release()
 
 
     def _show_hold_hint(self):
@@ -627,6 +638,40 @@ class ButtonListScreen(BaseTopNavScreen):
         return self.requires_hold_to_confirm
 
 
+    def hold_rect(self, index: int) -> tuple[int, int, int, int]:
+        """
+        SeedSigner Max (0027): where the finger may stay while holding button `index`: the
+        button grown by HardwareButtons.HOLD_MARGIN_PX, but never into another visible
+        button. Without the clip a hold that landed on "Skip verification" kept counting
+        with the finger resting on the bottom of "Verify", right above it.
+        """
+        margin = self.hw_inputs.HOLD_MARGIN_PX
+        # A neighbor owns its tap zone too (button_index_at): the gap between two buttons
+        # belongs to whichever a tap there would choose, for holds as for taps
+        tap_margin = int(GUIConstants.LIST_ITEM_PADDING / 2) + 1
+        x1, y1, x2, y2 = component_rect(self.buttons[index])
+        hx1, hy1, hx2, hy2 = x1 - margin, y1 - margin, x2 + margin, y2 + margin
+        for j, other in enumerate(self.buttons):
+            if j == index or not self._is_button_visible(other):
+                continue
+            ox1, oy1, ox2, oy2 = component_rect(other)
+            ox1, oy1, ox2, oy2 = ox1 - tap_margin, oy1 - tap_margin, ox2 + tap_margin, oy2 + tap_margin
+            if ox2 < hx1 or ox1 > hx2 or oy2 < hy1 or oy1 > hy2:
+                continue
+            if oy2 < y1:
+                hy1 = max(hy1, oy2 + 1)
+            elif oy1 > y2:
+                hy2 = min(hy2, oy1 - 1)
+            elif ox2 < x1:
+                hx1 = max(hx1, ox2 + 1)
+            elif ox1 > x2:
+                hx2 = min(hx2, ox1 - 1)
+            else:
+                # Overlapping tap zones: no wandering at all
+                hx1, hy1, hx2, hy2 = x1, y1, x2, y2
+        return (hx1, hy1, hx2, hy2)
+
+
     def handle_touch(self, event: TouchEvent):
         code = self.touch_top_nav(event)
         if code is not None:
@@ -644,7 +689,7 @@ class ButtonListScreen(BaseTopNavScreen):
             # Only a hold confirms: a tap, however firm, does nothing here
             if event.is_down:
                 self.touch_select_button(index)
-                if self.hw_inputs.track_touch_hold(component_rect(self.buttons[index]), progress_callback=self._render_hold_progress):
+                if self.hw_inputs.track_touch_hold(self.hold_rect(index), margin=0, progress_callback=self._render_hold_progress):
                     return HardwareButtonsConstants.KEY_PRESS
                 self._show_hold_hint()
             return None

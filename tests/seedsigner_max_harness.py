@@ -273,6 +273,29 @@ def test_ili9486_driver():
           and pixel_transfers[4] == expected_pixels[256 * 960:],
           "big-endian RGB565: red bands, then green, then orange")
 
+    # 0027: a partial update of rows 272..312 (the hold bar of a bottom button): one band,
+    # window 0..479 x 272..312, exactly those rows' pixels, same framing as a full frame
+    log.clear()
+    disp.show_rows(frame_image, 272, 312)
+    traffic = bus(log)
+    expected = [
+        (0, "xfer", [0, 0x2A]), (1, "xfer", word16(0) + word16(479)),
+        (0, "xfer", [0, 0x2B]), (1, "xfer", word16(272) + word16(312)),
+        (0, "xfer", [0, 0x2C]),
+        (1, "pixels", expected_pixels[272 * 960:313 * 960]),
+    ]
+    check([(t[0], t[1], t[2]) for t in traffic] == expected,
+          "rows 272..312: one band, its own window and RAMWR, exactly those rows' pixels (39360 bytes)")
+    log.clear()
+    disp.show_rows(frame_image, 0, 319)
+    check([len(t[2]) for t in bus(log) if t[1] == "pixels"] == [61440] * 5, "all rows: the same 5 bands as a full frame")
+    for bad in ((-1, 10), (300, 320), (50, 40)):
+        try:
+            disp.show_rows(frame_image, *bad)
+            check(False, f"rows {bad} rejected")
+        except ValueError:
+            check(True, f"rows {bad} rejected")
+
     log.clear()
     disp.invert(enabled=True)
     check([(t[0], t[2]) for t in bus(log)] == [(0, [0, 0x21])], "'Invert colors' = INVON")
@@ -444,8 +467,9 @@ def test_swipe_scrolls_long_list():
     screen = _menu(n=12, show_back_button=False)
     check(screen.has_scroll_arrows, "12 items need scrolling")
     first_slot = _button_center(screen, 0)
-    # Finger up by just over 3 rows: the list scrolls 3 rows; the first slot is now item 3
-    touch.set_script(GUARD + drag((240, 290), (240, 290 - 3 * 44 - 6), duration=0.6) + tap(first_slot))
+    # Finger up by 3 rows and 20 px (not 4 rows): the list scrolls 3 rows; the first slot is
+    # now item 3. 0027: was +6 px, which the lag of the 3-sample median sometimes ate (flaky)
+    touch.set_script(GUARD + drag((240, 290), (240, 290 - 3 * 44 - 20), duration=0.6) + tap(first_slot))
     result = screen.display()
     check(result == 3, f"swipe up 3 rows, tap the top slot: item 3 ({result!r})")
     screenshot("max_menu_scrolled.png")

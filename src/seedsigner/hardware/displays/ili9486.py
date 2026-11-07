@@ -176,6 +176,20 @@ class ILI9486(BaseDisplayDriver):
         self._write_region(0, 0, self.width, self.height, image_to_rgb565_be(image))
 
 
+    def show_rows(self, image, y1: int, y2: int):
+        """
+        SeedSigner Max (0027): send only rows y1..y2 (inclusive) of a full-screen `image`,
+        through the same banded writes as a whole frame.
+        """
+        imwidth, imheight = image.size
+        if imwidth != self.width or imheight != self.height:
+            raise ValueError(f"Image must be same dimensions as display ({self.width}x{self.height}).")
+        if not 0 <= y1 <= y2 < self.height:
+            raise ValueError(f"Rows {y1}..{y2} outside the display")
+        rows = image.crop((0, y1, self.width, y2 + 1))
+        self._write_region(0, y1, self.width, y2 - y1 + 1, image_to_rgb565_be(rows))
+
+
     def _write_region(self, x0: int, y0: int, width: int, height: int, pixels: bytes):
         """
         Write `pixels` (big-endian RGB565, `width` x `height`, row by row) at (x0, y0) in

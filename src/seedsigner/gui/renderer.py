@@ -93,6 +93,21 @@ class Renderer(ConfigurableSingleton):
         self.disp.show_image(self.canvas, 0, 0)
 
 
+    def show_rows(self, y1: int, y2: int):
+        """
+        SeedSigner Max (0027): send only canvas rows y1..y2 (inclusive, full width) to the
+        display, if its driver can; the whole frame otherwise. The hold-to-confirm bar uses
+        it so the touch panel is left unread for ~15 ms instead of a full frame (~100 ms).
+        """
+        show = getattr(self.disp, "show_rows", None)
+        y1 = max(0, int(y1))
+        y2 = min(self.canvas_height - 1, int(y2))
+        if show is None or y2 < y1:
+            self.disp.show_image(self.canvas, 0, 0)
+            return
+        show(self.canvas, y1, y2)
+
+
     def show_image_pan(self, image, start_x, start_y, end_x, end_y, rate, alpha_overlay=None):
         cur_x = start_x
         cur_y = start_y
