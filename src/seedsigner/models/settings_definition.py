@@ -363,7 +363,6 @@ class SettingsConstants:
     SETTING__SCRIPT_TYPES = "script_types"
     SETTING__XPUB_DETAILS = "xpub_details"
     SETTING__PASSPHRASE = "passphrase"
-    SETTING__SCRAMBLED_KEYBOARD = "scrambled_keyboard"   # SeedSigner Max
     SETTING__MAX_CAMERA_RESOLUTION = "max_camera_resolution"   # SeedSigner Max (tuning)
     SETTING__MAX_DISPLAY_SPI_MHZ = "max_display_spi_mhz"       # SeedSigner Max (tuning)
     SETTING__MAX_CAMERA_ZOOM = "max_camera_zoom"               # SeedSigner Max
@@ -676,17 +675,6 @@ class SettingsDefinition:
                       visibility=SettingsConstants.VISIBILITY__ADVANCED,
                       selection_options=SettingsConstants.OPTIONS__ENABLED_DISABLED_REQUIRED,
                       default_value=SettingsConstants.OPTION__ENABLED),
-
-        # SeedSigner Max: on a touch screen the keys are always in the same place, so
-        # finger smudges or a camera over the shoulder can give the passphrase away.
-        # Shuffling the keys each time the passphrase screen opens defeats both.
-        SettingsEntry(category=SettingsConstants.CATEGORY__FEATURES,
-                      attr_name=SettingsConstants.SETTING__SCRAMBLED_KEYBOARD,
-                      abbreviated_name="scramble",
-                      display_name=_mft("Shuffle passphrase keys"),
-                      type=SettingsConstants.TYPE__ENABLED_DISABLED,
-                      visibility=SettingsConstants.VISIBILITY__ADVANCED if hw_profile.is_max_profile() else SettingsConstants.VISIBILITY__HIDDEN,
-                      default_value=SettingsConstants.OPTION__DISABLED),
 
         SettingsEntry(category=SettingsConstants.CATEGORY__FEATURES,
                       attr_name=SettingsConstants.SETTING__CAMERA_ROTATION,

@@ -593,36 +593,29 @@ def test_passphrase_screen():
     check(result == dict(passphrase="x"), f"check mark saves: {result!r}")
 
 
-def test_shuffled_passphrase_keys():
+def test_passphrase_keys_in_their_usual_places():
+    """
+    0030: the "Shuffle passphrase keys" option is gone (with a stylus there are no
+    smudges to hide): the passphrase keyboard is SeedSigner 0.8.7's, in its order, and a
+    SettingsQR that still carries the old option is accepted, the option ignored.
+    """
     from seedsigner.gui.screens.seed_screens import SeedAddPassphraseScreen
-    from seedsigner.gui.screens.screen import component_rect
     from seedsigner.models.settings import Settings
-    settings = Settings.get_instance()
-    check(settings.get_value(SettingsConstants.SETTING__SCRAMBLED_KEYBOARD) == SettingsConstants.OPTION__DISABLED, "shuffled keys are off by default")
-    settings.set_value(SettingsConstants.SETTING__SCRAMBLED_KEYBOARD, SettingsConstants.OPTION__ENABLED)
-    try:
-        layouts = []
-        for _ in range(3):
-            screen = SeedAddPassphraseScreen(title="BIP-39 Passphrase")
-            lower = screen.keyboard_abc.charset
-            upper = screen.keyboard_ABC.charset
-            layouts.append(lower)
-            check(sorted(lower) == list("abcdefghijklmnopqrstuvwxyz") and upper == lower.upper(),
-                  f"every letter once, uppercase in the same places: {lower}")
-            check(sorted(screen.keyboard_digits.charset) == list("0123456789"), "every digit once")
-        check(len(set(layouts)) == 3 and "abcdefghijklmnopqrstuvwxyz" not in layouts, "a new layout every time the screen opens")
-
-        hw, touch = setup_inputs()
+    from seedsigner.models.settings_definition import SettingsDefinition
+    check(not hasattr(SettingsConstants, "SETTING__SCRAMBLED_KEYBOARD")
+          and SettingsDefinition.get_settings_entry_by_abbreviated_name("scramble") is None,
+          "no shuffle setting any more")
+    names = [e.display_name for e in SettingsDefinition.get_settings_entries(visibility=SettingsConstants.VISIBILITY__ADVANCED)]
+    check(not any("huffle" in n for n in names), f"Advanced has no shuffle entry: {names}")
+    for _ in range(3):
         screen = SeedAddPassphraseScreen(title="BIP-39 Passphrase")
-        abc = screen.keyboard_abc
-        touch.set_script(GUARD + tap(_key_center(abc, "o")) + tap(_key_center(abc, "k")) + tap(center(component_rect(screen.hw_button3))))
-        with Renderer.get_instance().lock:
-            screen._render()
-        screenshot("max_passphrase_shuffled.png")
-        result = screen.display()
-        check(result == dict(passphrase="ok"), f"typing on the shuffled layout: {result!r}")
-    finally:
-        settings.set_value(SettingsConstants.SETTING__SCRAMBLED_KEYBOARD, SettingsConstants.OPTION__DISABLED)
+        check(screen.keyboard_abc.charset == "abcdefghijklmnopqrstuvwxyz"
+              and screen.keyboard_ABC.charset == "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              and screen.keyboard_digits.charset == "0123456789",
+              f"keys in alphabetical order: {screen.keyboard_abc.charset}")
+    name, updated = Settings.parse_settingsqr("settings::v1 name=Old scramble=E camera=0")
+    check(name == "Old" and "scramble" not in str(updated) and len(updated) == 1,
+          f"an old SettingsQR with scramble=E: the option is ignored ({updated})")
 
 
 def Keyboard_KEY_SPACE():
@@ -1428,20 +1421,30 @@ def _test_carrier_power_pins(GPIO, power, levels):
 
 
 
-def test_io_test_screen_touch():
-    from seedsigner.gui.screens.settings_screens import IOTestScreen
-    from seedsigner.gui.screens.screen import component_rect
-    hw, touch = setup_inputs()
-    screen = IOTestScreen()
-    with Renderer.get_instance().lock:
-        screen._render()
-    K = HardwareButtonsConstants
-    check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, *center(component_rect(screen.key3_button)), tap=True)) == K.KEY3, "I/O test: Exit button")
-    check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, *center(component_rect(screen.joystick_up_button)), tap=True)) == K.KEY_UP, "I/O test: d-pad up")
-    check(screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 250, 200, tap=True)) is None, "I/O test: other taps only draw a cross")
-    screen.handle_touch(TouchEvent(TouchEvent.TYPE__UP, 260, 120, tap=True))
-    check(Renderer.get_instance().canvas.getpixel((250, 200)) != (0, 0, 0), "the cross is drawn where the touch was read")
-    screenshot("max_io_test_crosses.png")
+def test_no_io_test_on_the_max():
+    """
+    0030: the I/O test shows the classic joystick and KEY1-3, which the Max does not
+    have: it is not in the Settings menu (the touch is checked from Touch calibration)
+    """
+    from seedsigner.gui.screens.screen import RET_CODE__BACK_BUTTON
+    from seedsigner.views import settings_views
+    def menu(visibility):
+        captured = {}
+        view = settings_views.SettingsMenuView(visibility=visibility)
+
+        def fake_run_screen(screen_cls, **kwargs):
+            captured.update(kwargs)
+            view.screen = MagicMock()
+            return RET_CODE__BACK_BUTTON
+        view.run_screen = fake_run_screen
+        view.run()
+        return [b.button_label for b in captured.get("button_data", [])]
+
+    general = menu(SettingsConstants.VISIBILITY__GENERAL)
+    check(hw_profile.is_max_profile() and "I/O test" not in general and "Advanced" in general,
+          f"Settings menu without I/O test: {general}")
+    hardware = menu(SettingsConstants.VISIBILITY__HARDWARE)
+    check("Touch calibration" in hardware, f"Advanced > Hardware still has Touch calibration: {hardware}")
 
 
 
@@ -1589,7 +1592,7 @@ if __name__ == "__main__":
     test_hold_to_confirm()
     test_keyboard_screens()
     test_passphrase_screen()
-    test_shuffled_passphrase_keys()
+    test_passphrase_keys_in_their_usual_places()
     test_mnemonic_entry_screen()
     test_word_tap_with_a_landing_offset()
     test_camera_loops_get_touch_input()
@@ -1606,7 +1609,7 @@ if __name__ == "__main__":
     test_press_reading_drops_landing_noise()
     test_touch_raw_test_screen()
     test_power_pins()
-    test_io_test_screen_touch()
+    test_no_io_test_on_the_max()
     test_battery_icon()
     test_display_speed_setting()
     test_battery_screen()

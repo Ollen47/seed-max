@@ -49,7 +49,11 @@ class SettingsMenuView(View):
             button_data.append(self.ADVANCED)
             next_destination = Destination(SettingsMenuView, view_args={"visibility": SettingsConstants.VISIBILITY__ADVANCED})
 
-            button_data.append(self.IO_TEST)
+            # SeedSigner Max (0030): the I/O test shows the classic joystick and KEY1-3,
+            # which the Max does not have; the touch is checked from "Touch calibration"
+            from seedsigner.hardware import hw_profile
+            if not hw_profile.is_max_profile():
+                button_data.append(self.IO_TEST)
             button_data.append(self.DONATE)
 
         elif self.visibility == SettingsConstants.VISIBILITY__ADVANCED:

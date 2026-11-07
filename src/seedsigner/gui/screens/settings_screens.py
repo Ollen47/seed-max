@@ -10,7 +10,6 @@ from seedsigner.gui.components import Button, CheckboxButton, CheckedSelectionBu
 from seedsigner.gui.screens.scan_screens import ScanScreen
 from seedsigner.gui.screens.screen import BaseScreen, BaseTopNavScreen, ButtonListScreen, ButtonOption
 from seedsigner.hardware.buttons import HardwareButtonsConstants
-from seedsigner.hardware.touch import TouchEvent
 from seedsigner.hardware.camera import Camera
 from seedsigner.models.settings import SettingsConstants
 from seedsigner.models.threads import BaseThread
@@ -173,38 +172,6 @@ class IOTestScreen(BaseTopNavScreen):
             is_scrollable_text=False,  # No help for l10n, but currently ScrollableTextLine interferes with the small button's left edge. (TODO:)
         )
         self.components.append(self.key3_button)
-
-
-    def handle_touch(self, event: TouchEvent):
-        """
-        SeedSigner Max: the on-screen pictograms become buttons (camera / clear / exit on
-        the right, the d-pad on the left). A tap anywhere else draws a small cross where
-        the touch was read: a quick check of the touch calibration.
-        """
-        from seedsigner.gui.screens.screen import component_rect
-        from seedsigner.hardware.touch import rect_contains
-        if not event.is_tap:
-            return None
-        targets = (
-            (self.key1_button, HardwareButtonsConstants.KEY1),
-            (self.key2_button, HardwareButtonsConstants.KEY2),
-            (self.key3_button, HardwareButtonsConstants.KEY3),
-            (self.joystick_click_button, HardwareButtonsConstants.KEY_PRESS),
-            (self.joystick_up_button, HardwareButtonsConstants.KEY_UP),
-            (self.joystick_down_button, HardwareButtonsConstants.KEY_DOWN),
-            (self.joystick_left_button, HardwareButtonsConstants.KEY_LEFT),
-            (self.joystick_right_button, HardwareButtonsConstants.KEY_RIGHT),
-        )
-        for button, code in targets:
-            if rect_contains(component_rect(button), event.x, event.y, margin=int(GUIConstants.COMPONENT_PADDING / 2)):
-                return code
-
-        with self.renderer.lock:
-            size = 6
-            self.image_draw.line((event.x - size, event.y, event.x + size, event.y), fill=GUIConstants.ACCENT_COLOR, width=2)
-            self.image_draw.line((event.x, event.y - size, event.x, event.y + size), fill=GUIConstants.ACCENT_COLOR, width=2)
-            self.renderer.show_image()
-        return None
 
 
     def _run(self):

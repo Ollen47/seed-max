@@ -73,6 +73,21 @@ class TestSettingsFlows(FlowTest):
 
     def test_io_test(self):
         """ Basic flow from MainMenuView to I/O Test View """
+        from seedsigner.hardware import hw_profile
+        if hw_profile.is_max_profile():
+            # SeedSigner Max (0030): no joystick or KEY1-3, so no I/O test in the menu
+            from unittest.mock import MagicMock
+            view = settings_views.SettingsMenuView()
+            seen = {}
+
+            def fake_run_screen(screen_cls, **kwargs):
+                seen.update(kwargs)
+                view.screen = MagicMock()
+                return RET_CODE__BACK_BUTTON
+            view.run_screen = fake_run_screen
+            view.run()
+            assert settings_views.SettingsMenuView.IO_TEST not in seen["button_data"]
+            return
         self.run_sequence([
             FlowStep(MainMenuView, button_data_selection=MainMenuView.SETTINGS),
             FlowStep(settings_views.SettingsMenuView, button_data_selection=settings_views.SettingsMenuView.IO_TEST),

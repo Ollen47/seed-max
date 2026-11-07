@@ -819,21 +819,6 @@ class SeedAddPassphraseScreen(BaseTopNavScreen):
         # Isolate the more math-oriented or just uncommon symbols
         keys_symbol_2 = """^*[]{}_\\|<>/`~"""
 
-        # SeedSigner Max: optionally shuffle every key layout, freshly each time this
-        # screen opens (see SETTING__SCRAMBLED_KEYBOARD). Lowercase and uppercase share
-        # one permutation, so switching case keeps every letter where it was.
-        from seedsigner.models.settings import Settings, SettingsConstants
-        if Settings.get_instance().get_value(SettingsConstants.SETTING__SCRAMBLED_KEYBOARD) == SettingsConstants.OPTION__ENABLED:
-            import secrets
-            rng = secrets.SystemRandom()
-            order = list(range(len(keys_lower)))
-            rng.shuffle(order)
-            keys_lower = "".join(keys_lower[i] for i in order)
-            keys_upper = "".join(keys_upper[i] for i in order)
-            keys_number = "".join(rng.sample(keys_number, len(keys_number)))
-            keys_symbol_1 = "".join(rng.sample(keys_symbol_1, len(keys_symbol_1)))
-            keys_symbol_2 = "".join(rng.sample(keys_symbol_2, len(keys_symbol_2)))
-
 
         # Set up the keyboard params
         self.right_panel_buttons_width = 56
