@@ -689,7 +689,13 @@ class ButtonListScreen(BaseTopNavScreen):
             # Only a hold confirms: a tap, however firm, does nothing here
             if event.is_down:
                 self.touch_select_button(index)
-                if self.hw_inputs.track_touch_hold(self.hold_rect(index), margin=0, progress_callback=self._render_hold_progress):
+                # Pauses animations that would compete for the display and the SPI bus (0027)
+                self.hold_in_progress = True
+                try:
+                    held = self.hw_inputs.track_touch_hold(self.hold_rect(index), margin=0, progress_callback=self._render_hold_progress)
+                finally:
+                    self.hold_in_progress = False
+                if held:
                     return HardwareButtonsConstants.KEY_PRESS
                 self._show_hold_hint()
             return None
@@ -1415,6 +1421,11 @@ class WarningEdgesThread(BaseThread):
 
         try:
             while self.keep_running:
+                if getattr(screen, "hold_in_progress", False):
+                    # SeedSigner Max (0027): no full frames while a hold-to-confirm runs,
+                    # so they can't keep the touch panel waiting on the shared SPI bus
+                    time.sleep(0.05)
+                    continue
                 with screen.renderer.lock:
                     # Ramp the edges from a darker version out to full color
                     inhale_scalar = inhale_factor * int(255/inhale_max)

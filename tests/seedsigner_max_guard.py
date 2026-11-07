@@ -141,6 +141,7 @@ def install_touch(script, lead=0.0):
     hw.touch_tracker.reset()
     hw.touch_blocked_rect = None
     hw.touch_last_contact_ms = 0
+    hw.touch_last_contact_mono = None
     return hw.touch_device
 
 
@@ -366,6 +367,111 @@ def test_wall_clock_step_does_not_shorten_the_hold():
                  [(0.7, None), (0.3, APPROVE), (5, None)], "TIMEOUT", timeout=3.0, before=step_clock(0.85, step))
     scenario("wall clock -30 s during a 1.3 s hold: approved", finalize_screen,
              [(0.7, None), (1.3, APPROVE), (5, None)], 0, timeout=3.5, before=step_clock(1.0, -30))
+    # Final review: a step back while the finger is up must not hide the lift (the tracker
+    # times its release on the monotonic clock too)
+    for at in (1.03, 1.1):
+        scenario(f"wall clock -30 s at {at} s, during a 600 ms lift: ignored", finalize_screen,
+                 [(0.7, None), (0.3, APPROVE), (0.6, None), (0.4, APPROVE), (5, None)], "TIMEOUT",
+                 timeout=3.5, before=step_clock(at, -30))
+
+
+def test_stall_inside_a_read_cannot_hide_a_lift():
+    """
+    0028 (final adversarial review): one read that stalls 40-55 ms (SPI bus busy, a GC
+    pause) right as the finger lifts. The sample used to be timed before the read, so the
+    gap check missed the stall and the tracker saw under 60 ms of empty samples: a 120 ms
+    lift was bridged. Samples are now timed after the read and a lift is measured from the
+    last sample with contact. A genuine hold with such a stall still approves (the stall
+    restarts the count if it makes a 60 ms gap; a short one doesn't).
+    """
+    def stall_once(at, stall):
+        def before(screen):
+            device = hw.touch_device
+            original = device.read
+            state = {"done": False}
+
+            def read():
+                if device.t0 is not None and not state["done"] and time.monotonic() - device.t0 >= at:
+                    state["done"] = True
+                    time.sleep(stall)
+                return original()
+            device.read = read
+            device.is_touched = lambda: read() is not None
+        return before
+
+    for stall in (0.04, 0.055):
+        for lift in (0.08, 0.12, 0.15):
+            scenario(f"{stall * 1000:.0f} ms read stall as the finger lifts for {lift * 1000:.0f} ms: ignored",
+                     finalize_screen, [(0.7, None), (0.45, APPROVE), (lift, None), (0.7, APPROVE), (5, None)],
+                     "TIMEOUT", timeout=3.5, frame_ms=100, before=stall_once(1.148, stall))
+        # The stall is unseen time: with the loop's own pause it reaches the 60 ms gap and
+        # the count restarts after it (on purpose), so a 2 s hold still approves
+        scenario(f"{stall * 1000:.0f} ms read stall in a 2 s hold: approved (count restarted)", finalize_screen,
+                 [(0.7, None), (2.0, APPROVE), (5, None)], 0, timeout=3.5, frame_ms=100,
+                 before=stall_once(1.3, stall))
+    scenario("20 ms read stall in a 1.4 s hold: approved", finalize_screen,
+             [(0.7, None), (1.4, APPROVE), (5, None)], 0, timeout=3.5, frame_ms=100,
+             before=stall_once(1.3, 0.02))
+
+
+def test_every_sample_timing_errs_towards_cancelling():
+    """
+    0028 (second review). A sample is taken somewhere inside its read, so a stall can sit
+    after it too (GC pause, preemption): the finger then looks present later than it was.
+    Contacts now count from the start of their read, empties from the end, gaps from the
+    start of the previous read: 20-38 ms stalls after the last contact sample, with
+    70-100 ms lifts, never approve. And the frame that selects the button (the panel
+    unread, a whole screen) is watched too: a lift under it restarts the count.
+    """
+    def post_stall(at, stall):
+        def before(screen):
+            device = hw.touch_device
+            original = device.read
+            state = {"done": False}
+
+            def read():
+                point = original()
+                if (point is not None and device.t0 is not None and not state["done"]
+                        and time.monotonic() - device.t0 >= at):
+                    state["done"] = True
+                    time.sleep(stall)
+                return point
+            device.read = read
+            device.is_touched = lambda: read() is not None
+        return before
+
+    for stall in (0.02, 0.03, 0.038):
+        for lift in (0.07, 0.1):
+            scenario(f"{stall * 1000:.0f} ms stall after the last contact sample, {lift * 1000:.0f} ms lift: ignored",
+                     finalize_screen, [(0.7, None), (0.45, APPROVE), (lift, None), (0.7, APPROVE), (5, None)],
+                     "TIMEOUT", timeout=3.5, frame_ms=100, before=post_stall(1.13, stall))
+    for frame_ms in (100, 200):
+        for lift in (0.08, 0.18):
+            scenario(f"{frame_ms} ms frames: 40 ms touch, {lift * 1000:.0f} ms lift under the select frame, 1.05 s hold: ignored",
+                     finalize_screen, [(0.7, None), (0.04, APPROVE), (lift, None), (1.05, APPROVE), (5, None)],
+                     "TIMEOUT", timeout=4.0, frame_ms=frame_ms)
+
+
+def test_flicker_is_tolerated_with_slow_reads():
+    """ 0028 (second review): 30-40 ms dropouts still ride through when each read costs 10 ms """
+    def slow_reads(cost):
+        def before(screen):
+            device = hw.touch_device
+            original = device.read
+
+            def read():
+                time.sleep(cost)
+                return original()
+            device.read = read
+        return before
+
+    for dropout in (0.03, 0.04):
+        script = [(0.7, None)]
+        for _ in range(9):
+            script += [(0.15, APPROVE), (dropout, None)]
+        script += [(0.3, APPROVE), (5, None)]
+        scenario(f"10 ms reads, {dropout * 1000:.0f} ms dropouts every 150 ms: approved", finalize_screen,
+                 script, 0, timeout=5.0, frame_ms=100, before=slow_reads(0.01))
 
 
 def test_flicker_is_tolerated_in_a_hold():
@@ -421,6 +527,39 @@ def test_export_xpub_bar_moves_while_the_edges_animate():
     _, status = os.waitpid(pid, 0)
     if os.WEXITSTATUS(status) != 0:
         failures.append("xpub bar moves while the edges animate")
+
+
+def test_edges_animation_pauses_during_a_hold():
+    """
+    Final review: the xpub screen's warning edges send full frames on the SPI bus the
+    touch panel shares; none goes out while a hold runs, and the animation resumes after
+    """
+    events = []
+
+    class Recorder(DummyDisp):
+        def show_image(self, img, x=0, y=0):
+            events.append(("frame", time.monotonic()))
+
+        def show_rows(self, img, y1, y2):
+            events.append(("rows", time.monotonic()))
+
+    pid = os.fork()
+    if pid == 0:
+        renderer.disp = Recorder()
+        screen = xpub_screen()
+        button = center(component_rect(screen.buttons[0]))
+        install_touch([(0.7, None), (1.3, button), (5, None)])
+        result = run_with_timeout(screen, 3.5)
+        rows = [t for kind, t in events if kind == "rows"]
+        frames = [t for kind, t in events if kind == "frame"]
+        during = [t for t in frames if rows and rows[0] < t < rows[-1]]
+        ok = result == 0 and len(rows) >= 3 and not during and len(frames) >= 3
+        print(("ok    " if ok else "FAIL  ") + f"xpub hold: {result!r}, {len(rows)} bar redraws, "
+              f"{len(during)} full frames during the hold, {len(frames)} in all", flush=True)
+        os._exit(0 if ok else 1)
+    _, status = os.waitpid(pid, 0)
+    if os.WEXITSTATUS(status) != 0:
+        failures.append("edges animation pauses during a hold")
 
 
 def test_gap_between_buttons_belongs_to_the_tap_owner():
@@ -640,8 +779,12 @@ if __name__ == "__main__":
     test_hold_bar_redraws_only_the_button_rows()
     test_unread_stretches_restart_the_hold()
     test_wall_clock_step_does_not_shorten_the_hold()
+    test_stall_inside_a_read_cannot_hide_a_lift()
+    test_every_sample_timing_errs_towards_cancelling()
     test_flicker_is_tolerated_in_a_hold()
+    test_flicker_is_tolerated_with_slow_reads()
     test_export_xpub_bar_moves_while_the_edges_animate()
     test_gap_between_buttons_belongs_to_the_tap_owner()
+    test_edges_animation_pauses_during_a_hold()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

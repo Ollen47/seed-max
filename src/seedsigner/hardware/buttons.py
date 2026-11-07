@@ -20,6 +20,7 @@ class HardwareButtons(Singleton):
     HOLD_MAX_BLIND_MS = 40        # 0027: a bar redraw slower than this: no more redraws in that hold
     HOLD_MAX_SAMPLE_GAP_MS = 60   # 0027: the panel unread this long (= TouchTracker.RELEASE_MS, the
                                   # shortest lift) could hide a lift: the hold count starts over
+    HOLD_POLL_S = 0.01            # 0028: pause between reads in a hold (the denser, the more flicker it rides)
     TOUCH_READ_ERROR_LOG_EVERY = 100
 
     if GPIO.RPI_INFO['P1_REVISION'] == 3: #This indicates that we have revision 3 GPIO
@@ -90,6 +91,8 @@ class HardwareButtons(Singleton):
             cls._instance.touch_require_release = False
             cls._instance.touch_pending_codes = []
             cls._instance.touch_last_contact_ms = 0    # last sample with a finger on the panel
+            # 0028: monotonic ms at which the read of that sample began (where a hold starts from)
+            cls._instance.touch_last_contact_mono = None
             cls._instance.touch_blocked_rect = None    # a toast is drawn here: touches landing on it are swallowed
             cls._instance.touch_read_errors = 0
 
@@ -184,10 +187,15 @@ class HardwareButtons(Singleton):
         if device is None:
             return []
 
+        read_from = int(time.monotonic() * 1000)
         point = self._read_touch(device)
         now = int(time.time() * 1000)
-        events = self.touch_tracker.feed(point, now)
+        # 0027: the tracker times releases on the monotonic clock (a wall-clock step back
+        # must not hide a lift); the guard and the screensaver keep wall-clock ms
+        events = self.touch_tracker.feed(point, int(time.monotonic() * 1000))
         if point is not None:
+            # 0028: a hold that starts from this press counts from here (see track_touch_hold)
+            self.touch_last_contact_mono = read_from
             # A finger on the panel counts as activity (screensaver)
             self.last_input_time = now
             self.touch_last_contact_ms = now
@@ -249,6 +257,13 @@ class HardwareButtons(Singleton):
         (a bar redraw, a slow read, the scheduler), restarts the count from that read on;
         a bar redraw slower than HOLD_MAX_BLIND_MS also turns redraws off for the rest of
         the hold. The count runs on the monotonic clock: a clock step can't shorten it.
+
+        0028: everything here runs on the monotonic clock (the tracker too). Each sample is
+        timed so that a stall before or after it can only cancel: gaps run from the start
+        of the previous read to the end of this one, and RELEASE_MS from the start of the
+        read of the last sample with the finger to the end of an empty one ends the hold.
+        Watching starts at the press that poll_touch saw, so the frame that selected the
+        button is checked too. The panel is read every HOLD_POLL_S.
         """
         duration_ms = duration_ms or self.HOLD_TO_CONFIRM_MS
         callback = progress_callback or (lambda progress: None)
@@ -259,23 +274,42 @@ class HardwareButtons(Singleton):
             return int(time.monotonic() * 1000)
 
         started = mono_ms()
-        previous_read = started
+        # 0028 (second review): the last sample that had the finger, from poll_touch, is
+        # where watching begins, so the frame that selects the button (a whole screen,
+        # ~100 ms, the panel unread) is a gap like any other: the count restarts after it
+        anchor = self.touch_last_contact_mono
+        if anchor is None or anchor > started:
+            anchor = started
+        previous_read = anchor    # when the previous read began
+        last_contact = anchor     # when the read of the last sample with the finger began
         last_redraw = None
         redraw_cost = 0
         redraws = True
         while True:
+            # A sample was taken somewhere between read_from and read_at, and a stall can
+            # sit on either side of it. Every timing errs towards cancelling (0028): the
+            # unseen stretch runs from the start of the previous read to the end of this
+            # one, a contact counts from the start of its read, an empty sample from the end
+            read_from = mono_ms()
+            point = self._read_touch(device) if device else None
             read_at = mono_ms()
             if read_at - previous_read >= self.HOLD_MAX_SAMPLE_GAP_MS:
                 # The panel went unread long enough to hide a lift: count again from here
                 started = read_at
-            previous_read = read_at
-            point = self._read_touch(device) if device else None
-            now = int(time.time() * 1000)      # the tracker and the guard keep wall-clock ms
-            self.touch_tracker.feed(point, now)
+            previous_read = read_from
+            now = int(time.time() * 1000)      # the guard keeps wall-clock ms
+            # The tracker times its release on the monotonic clock, like this count
+            self.touch_tracker.feed(point, read_at)
             if point is not None:
                 self.touch_last_contact_ms = now
+                self.touch_last_contact_mono = read_from
+                last_contact = read_from
+            # A lift, measured from the last sample that had the finger (0028), not from
+            # the first empty one as the tracker does: a stall right after the finger
+            # left can't stretch the lift that is tolerated as flicker
+            lifted = point is None and read_at - last_contact >= self.touch_tracker.RELEASE_MS
             position = self.touch_tracker.position
-            if position is None or not rect_contains(rect, position[0], position[1], margin=margin):
+            if lifted or position is None or not rect_contains(rect, position[0], position[1], margin=margin):
                 callback(None)
                 # Whatever the finger does next (still down and sliding, or the release
                 # itself) must not count as a tap somewhere else
@@ -306,7 +340,9 @@ class HardwareButtons(Singleton):
                     redraws = False
                 # Read again right away: the redraw already kept the panel unread
                 continue
-            time.sleep(0.02)
+            # 0028: read often (a GPIO check and one SPI transfer): the denser the samples,
+            # the longer the resistive flicker that a hold rides through
+            time.sleep(self.HOLD_POLL_S)
 
 
     def wait_for(self, keys=[]) -> int:
