@@ -120,20 +120,22 @@ TOUCH_PRESSURE_THRESHOLD = 400
 # Raw ADC -> screen coordinate calibration, as an affine transform:
 #   x = A*raw_x + B*raw_y + C
 #   y = D*raw_x + E*raw_y + F
-# This panel (Waveshare 3.5inch RPi LCD (A)), four-cross calibration of 29 Oct 2026 with
-# MADCTL 0xE8, max error 1.8 px:
-#   (0.12749, 0.00182, -29.54, 0.00066, -0.08586, 337.51)
-# raw X ran along the screen's x (~260 at the left edge, ~3780 at the right), raw Y
-# against the screen's y (~3930 at the top, ~200 at the bottom).
-# The touch film is glued to the glass, so turning the image 180 degrees (MADCTL 0x28)
-# leaves the raw readings where they were and only moves the pixels: the pixel that was
-# at (x, y) is now at (479 - x, 319 - y). Same calibration, turned:
-#   A, B -> -A, -B;  C -> 479 - C;  D, E -> -D, -E;  F -> 319 - F
+# This panel (Waveshare 3.5inch RPi LCD (A)), MADCTL 0x28 (image turned 180 degrees, Pi
+# and HAT at the bottom edge). Mean of two four-cross calibrations of 6 Nov 2026, made
+# with the stylus with the device held as in use (max error 0.4 px and 1.4 px; the two
+# agree within 4.7 px everywhere, 1.9 px on average):
+#   (-0.12769, 0.00035, 502.21, 0.00037, 0.08675, -24.75)
+#   (-0.12783, 0.00045, 501.74, -0.00015, 0.08551, -22.75)
+# History: the 29 Oct 2026 calibration was made with MADCTL 0xE8,
+#   (0.12749, 0.00182, -29.54, 0.00066, -0.08586, 337.51),
+# and only turned by arithmetic when the image was turned (0018: A, B, D, E change sign,
+# C -> 479 - C, F -> 319 - F). Measured in use, that turned value read taps 3-5 px too
+# low on the word list and up to ~6 px off near the top edge.
 # Recalibrate (Settings > Advanced > Hardware > Touch calibration) if the panel or
 # MADCTL ever changes.
 TOUCH_CALIBRATION = (
-    -0.12749, -0.00182, 508.54,             # A, B, C
-    -0.00066, 0.08586, -18.51,              # D, E, F
+    -0.12776, 0.00040, 501.98,              # A, B, C
+    0.00011, 0.08613, -23.75,               # D, E, F
 )
 
 # With an uncalibrated panel the menus may be impossible to hit, so the calibration

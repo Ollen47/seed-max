@@ -4,6 +4,7 @@ the calibration math and the XPT2046 response parsing, plus an isolated-interpre
 of tests/seedsigner_max_harness.py that drives the real HardwareButtons and the real
 screens with scripted, real-time touches on a 480x320 canvas.
 """
+import math
 import os
 import subprocess
 import sys
@@ -121,12 +122,121 @@ def test_median_filter_rejects_a_wild_sample():
     assert events[0].is_tap                         # the outlier didn't turn it into a drag
 
 
-def test_tap_position_is_where_the_finger_landed():
+def test_short_tap_position_is_where_the_finger_landed():
+    """ Too short to have a steady part: hit-tested where it landed, as before 0026 """
     f = Finger()
     f.hold((120, 80))
     f.samples((125, 84), (127, 86))                 # small drift within the slop
     events = f.lift()
     assert events[0].is_tap and (events[0].x, events[0].y) == (120, 80)
+
+
+def test_tap_position_is_the_steady_part_of_the_press():
+    """
+    0026: the stylus lands, the reading settles, the stylus lifts. The landing samples
+    (pressure still building up) and the lift-off samples are off; the tap is hit-tested
+    at the steady part, as the calibration measures its crosses.
+    """
+    f = Finger()
+    landing = [(200, 150), (200, 152), (200, 153)]   # read 10-13 px below the target...
+    steady = [(200, 140)] * 6                         # ...which is (200, 140)
+    lift_off = [(201, 155), (203, 158)]
+    events = f.samples(*landing, *steady, *lift_off) + f.lift()
+    down = [e for e in events if e.is_down][0]
+    up = [e for e in events if e.type == TouchEvent.TYPE__UP][0]
+    assert (down.x, down.y) == (200, 152)             # DOWN still reports the landing (median of 2)
+    assert up.is_tap and (up.x, up.y) == (200, 140)
+
+
+def test_tap_position_counts_from_the_first_contact_sample():
+    """
+    The samples that made the contact are the first ones dropped: with exactly
+    TAP_DROP_FIRST landing samples and TAP_MIN_STEADY steady ones, the steady ones win.
+    """
+    T = TouchTracker
+    f = Finger()
+    landing = [(300, 200)] * T.TAP_DROP_FIRST
+    steady = [(300, 185)] * T.TAP_MIN_STEADY
+    lift_off = [(300, 212)] * T.TAP_DROP_LAST           # within TAP_SLOP_PX: still a tap
+    up = (f.samples(*landing, *steady, *lift_off) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (300, 185)
+    # One steady sample less: not enough, the landing point is used
+    f = Finger()
+    up = (f.samples(*landing, *steady[1:], *lift_off) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (300, 200)
+
+
+def test_tap_position_ignores_a_wild_steady_sample():
+    """ The median of the steady samples: one glitch among them doesn't move the tap """
+    f = Finger()
+    samples = [(100, 100)] * 3 + [(100, 120), (100, 120), (100, 300), (100, 120), (100, 120)] + [(100, 100)] * 2
+    up = (f.samples(*samples) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (100, 120)
+
+
+def test_long_press_tap_position_is_bounded():
+    """ A long press keeps at most TAP_MAX_SAMPLES samples: memory stays bounded """
+    f = Finger()
+    f.samples(*[(50, 60)] * 500)
+    assert len(f.tracker._press_samples) == TouchTracker.TAP_MAX_SAMPLES
+    up = f.lift()[-1]
+    assert up.is_tap and (up.x, up.y) == (50, 60)
+
+
+def test_two_steady_samples_are_not_enough():
+    """ Literal counts (not the class constants): 3 landing + 2 steady + 2 lift-off -> landing """
+    f = Finger()
+    up = (f.samples(*[(300, 200)] * 3, *[(300, 185)] * 2, *[(300, 212)] * 2) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (300, 200)
+    f = Finger()   # 3 landing + 3 steady + 2 lift-off -> the steady position
+    up = (f.samples(*[(300, 200)] * 3, *[(300, 185)] * 3, *[(300, 212)] * 2) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (300, 185)
+    f = Finger()   # 2 landing samples only are dropped too: the 3rd is still landing
+    up = (f.samples(*[(300, 200)] * 3, *[(300, 185)] * 5, *[(300, 212)] * 2) + f.lift())[-1]
+    assert up.is_tap and (up.x, up.y) == (300, 185)
+
+
+def test_landing_samples_dropped_are_exactly_three():
+    """
+    Literal: with 4 'landing' samples the 4th is kept among the steady ones; with an even
+    count of steady samples the upper median is taken. 4 x 200 then 3 x 185 then 2 lift-off:
+    steady = [200, 185, 185, 185] -> 185; 3 x 200 then 1 x 190 then 3 x 185: [190, 185, 185, 185]
+    """
+    f = Finger()
+    up = (f.samples(*[(10, 200)] * 4, *[(10, 185)] * 3, *[(10, 205)] * 2) + f.lift())[-1]
+    assert (up.x, up.y) == (10, 185)
+    f = Finger()
+    up = (f.samples(*[(10, 200)] * 2, (10, 199), *[(10, 185)] * 3, *[(10, 205)] * 2) + f.lift())[-1]
+    assert (up.x, up.y) == (10, 185)            # (10, 199) is the 3rd sample: dropped
+    f = Finger()
+    up = (f.samples(*[(10, 200)] * 2, *[(10, 185)] * 4, *[(10, 205)] * 2) + f.lift())[-1]
+    assert (up.x, up.y) == (10, 185)
+    # An even count of steady samples takes the upper median, as everywhere in touch.py:
+    # steady y = 180, 182, 190, 192 -> 190
+    f = Finger()
+    up = (f.samples(*[(10, 200)] * 3, (10, 180), (10, 182), (10, 190), (10, 192), *[(10, 186)] * 2) + f.lift())[-1]
+    assert (up.x, up.y) == (10, 190)
+
+
+def test_long_press_keeps_the_first_samples():
+    """ A long press is positioned by its first 50 samples (where it was aimed), not its last """
+    f = Finger()
+    f.samples(*[(50, 60)] * 40, *[(50, 72)] * 400)
+    up = f.lift()[-1]
+    assert up.is_tap and (up.x, up.y) == (50, 60)
+
+
+def test_drag_still_ends_without_a_tap():
+    f = Finger()
+    events = f.samples(*[(240, y) for y in range(280, 120, -8)]) + f.lift()
+    up = [e for e in events if e.type == TouchEvent.TYPE__UP][0]
+    assert not up.is_tap
+    assert any(e.is_swipe for e in events)
+
+
+def test_tap_drop_matches_the_calibration():
+    """ Taps and calibration crosses drop the same landing samples (0026) """
+    assert TouchTracker.TAP_DROP_FIRST == PRESS_DROP_FIRST
 
 
 def test_sliding_away_cancels_the_tap():
@@ -220,18 +330,56 @@ def test_built_in_calibration_maps_the_touch_test_presses_onto_their_targets():
         assert abs(x - tx) <= 10 and abs(y - ty) <= 10, (raw, (x, y), (tx, ty))
 
 
-def test_turned_calibration_is_the_measured_one_turned_180_degrees():
-    """ Each raw reading lands on the pixel opposite to where the 0xE8 calibration put it """
+# The two four-cross calibrations of 6 Nov 2026 (MADCTL 0x28, stylus, device held as in use)
+CALIBRATIONS_6_NOV = (
+    (-0.12769, 0.00035, 502.21, 0.00037, 0.08675, -24.75),
+    (-0.12783, 0.00045, 501.74, -0.00015, 0.08551, -22.75),
+)
+
+
+def _screen_points():
+    return [(x, y) for x in range(0, 480, 20) for y in range(0, 320, 20)]
+
+
+def _distance_px(cal_a, cal_b, point):
+    """ How far apart two calibrations put the same raw reading, at the screen point `point` of `cal_a` """
+    a, b, c, d, e, f = cal_a.as_tuple()
+    det = a * e - b * d
+    x, y = point[0] - c, point[1] - f
+    raw_x, raw_y = (e * x - b * y) / det, (-d * x + a * y) / det
+    ox = cal_b.a * raw_x + cal_b.b * raw_y + cal_b.c
+    oy = cal_b.d * raw_x + cal_b.e * raw_y + cal_b.f
+    return math.hypot(ox - point[0], oy - point[1])
+
+
+def test_calibration_is_the_mean_of_the_6_nov_measurements():
+    """ 0026: the image carries the mean of the two calibrations measured in the current orientation """
     from seedsigner.hardware import hw_profile
-    measured = TouchCalibration(0.12749, 0.00182, -29.54, 0.00066, -0.08586, 337.51)
-    turned = TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
-    for raw_x in range(200, 4000, 350):
-        for raw_y in range(150, 4000, 350):
-            ox = measured.a * raw_x + measured.b * raw_y + measured.c
-            oy = measured.d * raw_x + measured.e * raw_y + measured.f
-            nx = turned.a * raw_x + turned.b * raw_y + turned.c
-            ny = turned.d * raw_x + turned.e * raw_y + turned.f
-            assert abs((479 - ox) - nx) < 1e-6 and abs((319 - oy) - ny) < 1e-6
+    for value, first, second in zip(hw_profile.TOUCH_CALIBRATION, *CALIBRATIONS_6_NOV):
+        assert abs(value - (first + second) / 2) <= 0.005 + 1e-9 * abs(value)
+    built_in = TouchCalibration.from_tuple(hw_profile.TOUCH_CALIBRATION)
+    for measured in CALIBRATIONS_6_NOV:
+        worst = max(_distance_px(built_in, TouchCalibration.from_tuple(measured), p) for p in _screen_points())
+        assert worst < 3.0, worst          # each measurement within 3 px of the mean everywhere
+
+
+def test_turned_29_oct_calibration_was_off_on_the_word_list():
+    """
+    Why 0026 recalibrated: the 29 Oct calibration turned by arithmetic (0018) puts a tap on
+    the word list (x 428, y 185) 3-5 px lower than both 6 Nov measurements do, and they
+    agree with each other there within 1.5 px.
+    """
+    turned_29_oct = TouchCalibration(-0.12749, -0.00182, 508.54, -0.00066, 0.08586, -18.51)
+    first, second = (TouchCalibration.from_tuple(c) for c in CALIBRATIONS_6_NOV)
+    for measured in (first, second):
+        # The raw reading the 6 Nov calibration maps onto (428, 185), through the old one
+        a, b, c, d, e, f = measured.as_tuple()
+        det = a * e - b * d
+        x, y = 428 - c, 185 - f
+        raw_x, raw_y = (e * x - b * y) / det, (-d * x + a * y) / det
+        old_y = turned_29_oct.d * raw_x + turned_29_oct.e * raw_y + turned_29_oct.f
+        assert 3.0 <= old_y - 185 <= 5.5, old_y
+    assert _distance_px(first, second, (428, 185)) < 1.5
 
 
 def test_boot_screens_off_in_the_calibrated_image():
@@ -332,15 +480,29 @@ def test_old_layout_reproduces_the_board_readings():
     assert parse_response(xpt2046_answer(READ_SEQUENCE, [800, 3500] + [2050] * 8), 400)[:2] == (2050, 2050)
 
 
+def test_parse_response_rejects_z1_equal_or_above_z2():
+    """ 0024: a reading with Z2 <= Z1 is not a real press (a pressed panel reads Z2 > Z1) """
+    base = [0x00, 0x09, 0x18, 0x55, 0xE0, 0x7F, 0xF8, 0x00, 0x08, 0x00, 0x10, 0x00, 0x18,
+            0x7F, 0xF8, 0x00, 0x20, 0x00, 0x28, 0x00, 0x30]
+    assert parse_response(base, 400) == (2, 5, 1638)
+    equal = list(base)
+    equal[3:5] = equal[1:3]                     # Z2 = Z1 = 0x123
+    assert parse_response(equal, 0) is None
+    swapped = list(base)
+    swapped[1:3], swapped[3:5] = base[3:5], base[1:3]   # Z1 = 0xABC > Z2 = 0x123
+    assert parse_response(swapped, 0) is None
+
+
 def test_decode_known_bytes():
     """
     Hand-built response: the k-th result sits in bytes 2k+1 (high) and 2k+2 (low) as
     busy bit + 12 data bits + 3 zero bits, i.e. value << 3.
     """
     # 0xABC << 3 = 0x55E0; 0x123 << 3 = 0x0918; 0xFFF << 3 = 0x7FF8; 0x001 << 3 = 0x0008
+    # A real press reads Z2 > Z1 (0024 drops readings with Z2 <= Z1): Z1 = 0x123, Z2 = 0xABC
     response = [0x00,            # byte 0: nothing comes back while Z1 is sent
-                0x55, 0xE0,      # Z1 = 0xABC
-                0x09, 0x18,      # Z2 = 0x123
+                0x09, 0x18,      # Z1 = 0x123
+                0x55, 0xE0,      # Z2 = 0xABC
                 0x7F, 0xF8,      # X0 = 0xFFF (settling read)
                 0x00, 0x08,      # X1 = 1
                 0x00, 0x10,      # X2 = 2
@@ -349,14 +511,14 @@ def test_decode_known_bytes():
                 0x00, 0x20,      # Y1 = 4
                 0x00, 0x28,      # Y2 = 5
                 0x00, 0x30]      # Y3 = 6
-    assert decode_results(response) == [0xABC, 0x123, 0xFFF, 1, 2, 3, 0xFFF, 4, 5, 6]
+    assert decode_results(response) == [0x123, 0xABC, 0xFFF, 1, 2, 3, 0xFFF, 4, 5, 6]
     # The busy bit (MSB of the high byte) and the three trailing bits are masked off
     noisy = list(response)
-    noisy[1] |= 0x80
-    noisy[2] |= 0x07
-    assert decode_results(noisy)[0] == 0xABC
-    # pressure = 0xABC + 4095 - 0x123 = 2748 + 4095 - 291 = 6552
-    assert parse_response(response, 400) == (2, 5, 6552)
+    noisy[3] |= 0x80
+    noisy[4] |= 0x07
+    assert decode_results(noisy)[1] == 0xABC
+    # pressure = 0x123 + 4095 - 0xABC = 291 + 4095 - 2748 = 1638
+    assert parse_response(response, 400) == (2, 5, 1638)
 
 
 def test_decode_results_roundtrip():

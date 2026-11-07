@@ -135,11 +135,11 @@ def test_zones_match_the_drawing():
     for index, y1, y2 in zones:
         lit = sum(1 for y in range(y1, y2 + 1) for x in range(x1, x1 + 30) if canvas.getpixel((x, y))[0] > 150)
         check(lit > 20, f"zone {y1}-{y2} covers the drawn word {screen.possible_words[index]!r} ({lit} text pixels)")
-    previous_bottom = None
-    for index, y1, y2 in zones:
-        if previous_bottom is not None:
-            check(y1 > previous_bottom + 1, f"dead band between zones before {screen.possible_words[index]!r}")
-        previous_bottom = y2
+    # 0026: no dead band. Every zone, the highlighted word's included, starts right
+    # below the previous one
+    all_zones = screen.match_zones()
+    gaps = [(a[2], b[1]) for a, b in zip(all_zones, all_zones[1:]) if b[1] != a[2] + 1]
+    check(not gaps, f"zones follow each other with no gap and no overlap (bad joins: {gaps})")
 
 
 def drawn_word_rows(screen):
@@ -174,8 +174,43 @@ def drawn_word_rows(screen):
     return rows
 
 
+def drawn_word_lines(screen):
+    """
+    Independent of match_rows(): {word: (top, baseline)} of every word on screen, the
+    line box each one is drawn in. The baseline is the y of the real draw.text() call
+    (anchor "ls"); the top is the baseline minus the font's own capital-and-ascender
+    height, measured here on "Hdl" with the same font. Lines with less than half of
+    that height on screen are left out (cut off by the bottom edge).
+    """
+    import PIL.ImageDraw
+    original = PIL.ImageDraw.ImageDraw.text
+    calls = []
+
+    def record(self, xy, text, *args, **kwargs):
+        calls.append((xy, text, kwargs.get("font")))
+        return original(self, xy, text, *args, **kwargs)
+
+    PIL.ImageDraw.ImageDraw.text = record
+    try:
+        screen.render_possible_matches()
+    finally:
+        PIL.ImageDraw.ImageDraw.text = original
+    left, top, right, bottom = screen.word_font.getbbox("Hdl", anchor="ls")
+    height = -top
+    lines = {}
+    for xy, text, font in calls:
+        if font is not screen.word_font:
+            continue
+        # The list is drawn on an image whose row `top_nav.height` lands on screen row
+        # `matches_list_y` (render_possible_matches pastes it there)
+        baseline = xy[1] - screen.top_nav.height + screen.matches_list_y
+        if baseline - height / 2 < screen.canvas_height:
+            lines[text] = (baseline - height, baseline)
+    return lines
+
+
 def test_zones_against_the_real_draw_calls():
-    """ Every zone covers only its own drawn word; every y in a zone chooses that word; dead bands do nothing """
+    """ Every zone covers only its own drawn word; every y in a zone chooses that word; a tap picks the nearest word drawn """
     problems = 0
     checked = 0
     for prefix in ("fo", "ab", "zo", "mush", "w"):
@@ -188,7 +223,7 @@ def test_zones_against_the_real_draw_calls():
             rows = drawn_word_rows(screen)
             x1, y1, x2, y2 = component_rect(screen.matches_list_highlight_button)
             zones = screen.match_row_zones()
-            covered = set(range(y1 - screen.MATCH_HIGHLIGHT_TOUCH_MARGIN, y2 + screen.MATCH_HIGHLIGHT_TOUCH_MARGIN + 1))
+            covered = set(range(y1, y2 + 1))      # the highlighted button itself
             for i, zy1, zy2 in zones:
                 checked += 1
                 own = {y for y in rows.get(words[i], set())}
@@ -206,13 +241,30 @@ def test_zones_against_the_real_draw_calls():
                         problems += 1
                         print(f"  tap: {prefix!r} index {index} y={y} expected word {i}, got {code} / {screen.selected_possible_words_index}")
                 covered.update(range(zy1, zy2 + 1))
+            # 0026, independent oracle: every tap between the first and the last word
+            # drawn picks the word whose drawn line (from the real draw calls; the
+            # highlighted word: its button) is nearest; a few px beyond them still
+            # count; further out nothing
+            screen.selected_possible_words_index = index      # the taps above moved it
+            extents = dict(drawn_word_lines(screen))
+            extents[words[index]] = (y1, y2)
+            top = min(e[0] for e in extents.values())
+            bottom = max(e[1] for e in extents.values())
             for y in range(screen.top_nav.height, screen.canvas_height):
-                if y in covered:
-                    continue
                 screen.selected_possible_words_index = index
-                if screen.touch_matches_list(tap(word_x(screen), y)) is not None or screen.selected_possible_words_index != index:
-                    problems += 1
-                    print(f"  dead band acted: {prefix!r} index {index} y={y}")
+                code = screen.touch_matches_list(tap(word_x(screen), y))
+                chosen = words[screen.selected_possible_words_index] if code == K.KEY2 else None
+                distances = sorted((max(e[0] - y, 0, y - e[1]), w) for w, e in extents.items())
+                if top <= y <= bottom:
+                    # Exactly on a midpoint either neighbor is a fair answer (rounding)
+                    fair = {w for d, w in distances if d <= distances[0][0] + 1}
+                    if chosen not in fair or code != K.KEY2:
+                        problems += 1
+                        print(f"  nearest: {prefix!r} index {index} y={y} chose {chosen!r}, nearest {distances[0][1]!r}")
+                elif y < top - 10 or y > bottom + 10:
+                    if code is not None:
+                        problems += 1
+                        print(f"  empty space acted: {prefix!r} index {index} y={y} chose {chosen!r}")
     check(checked > 100 and problems == 0, f"{checked} zones checked against the real draw calls, {problems} problems")
 
 
@@ -256,24 +308,77 @@ def test_swipe_still_scrolls():
     check(screen.selected_possible_words_index == 2, f"two swipes up: highlight on {screen.possible_words[screen.selected_possible_words_index]!r} ('fog')")
 
 
-def test_boundary_and_empty_space_are_ignored():
+def test_no_dead_band_and_empty_space_is_ignored():
+    """
+    0026: on the device a tap reads a few pixels off. Every pixel row from the first word
+    to the last chooses a word (no dead band); empty space beyond them still does nothing.
+    """
     screen = new_screen()
     run(screen, type_letters(screen, "fo"))
-    zones = screen.match_row_zones()
-    rejected = []
-    for (_, _, bottom), (_, top, _) in zip(zones, zones[1:]):
-        for y in range(bottom + 1, top):
-            if screen.handle_touch(tap(word_x(screen), y)) is not None:
-                rejected.append(y)
-    check(not rejected, f"taps on the boundaries between words do nothing (failed at y={rejected})")
-    check(screen.handle_touch(tap(word_x(screen), screen.top_nav.height + 5)) is None, "empty space above the first word does nothing")
+    zones = screen.match_zones()
+    dead = []
+    for y in range(zones[0][1], zones[-1][2] + 1):
+        screen.selected_possible_words_index = 0
+        if screen.handle_touch(tap(word_x(screen), y)) is None:
+            dead.append(y)
+    screen.selected_possible_words_index = 0
+    check(not dead, f"no dead band between the first and the last word (dead at y={dead[:10]})")
+    check(screen.handle_touch(tap(word_x(screen), zones[0][1] - 1)) is None, "the row above the first zone does nothing")
     check(screen.selected_possible_words_index == 0, "and the highlight did not move")
 
-    # Near the end of a short list: nothing below the last word
+    # Near the end of a short list: nothing well below the last word
     screen = new_screen()
     run(screen, type_letters(screen, "zo"))
     check(screen.possible_words == ["zone", "zoo"], f"'zo': {screen.possible_words}")
     check(screen.handle_touch(tap(word_x(screen), 300)) is None, "empty space below the last word does nothing")
+
+
+def test_list_edges_reach_four_pixels():
+    """
+    Literal 4 px beyond the first and last word (the drawn lines, not match_zones()):
+    from 4 px above the first line a tap chooses it, from 5 px it does nothing; same
+    below the last one.
+    """
+    for prefix in ("zo", "fo"):
+        screen = new_screen()
+        run(screen, type_letters(screen, prefix))
+        lines = drawn_word_lines(screen)
+        x1, y1, x2, y2 = component_rect(screen.matches_list_highlight_button)
+        lines[screen.possible_words[0]] = (y1, y2)       # the highlighted word: its button
+        first = min(lines.items(), key=lambda kv: kv[1][0])
+        last = max(lines.items(), key=lambda kv: kv[1][1])
+        results = {}
+        for name, (word, (top, bottom)), inside, outside in (
+                ("above the first", first, first[1][0] - 4, first[1][0] - 5),
+                ("below the last", last, last[1][1] + 4, last[1][1] + 5)):
+            screen.selected_possible_words_index = 0
+            code_in = screen.handle_touch(tap(word_x(screen), inside))
+            chosen = screen.possible_words[screen.selected_possible_words_index]
+            screen.selected_possible_words_index = 0
+            code_out = screen.handle_touch(tap(word_x(screen), outside)) if outside < screen.canvas_height else None
+            results[name] = (code_in == K.KEY2 and chosen == word, code_out is None)
+        check(all(a and b for a, b in results.values()), f"{prefix!r}: 4 px beyond the outer words counts, 5 px doesn't: {results}")
+
+
+def test_second_word_reachable_with_reading_offsets():
+    """
+    The report of 6 Nov 2026: right under the highlighted word, the second word could
+    not be chosen, because taps read lower than the stylus fell in the dead band below
+    it. Now any tap from 9 px above its drawn middle (halfway to the button) to 10 px below
+    (halfway to the next word) chooses it.
+    """
+    for prefix, second in (("b", "bachelor"), ("fo", "focus"), ("ab", "ability")):
+        screen = new_screen()
+        run(screen, type_letters(screen, prefix))
+        rows = drawn_word_rows(screen)[second]
+        drawn_middle = (min(rows) + max(rows)) // 2
+        missed = []
+        for offset in range(-9, 11):
+            screen.selected_possible_words_index = 0
+            code = screen.handle_touch(tap(word_x(screen), drawn_middle + offset))
+            if code != K.KEY2 or screen.possible_words[screen.selected_possible_words_index] != second:
+                missed.append(offset)
+        check(not missed, f"{prefix!r}: {second!r} (drawn middle y={drawn_middle}) chosen at every offset -9..+10 (missed: {missed})")
 
 
 def test_letters_and_back_unchanged():
@@ -298,7 +403,9 @@ if __name__ == "__main__":
     test_tap_the_highlighted_word()
     test_arrows_scroll_by_one()
     test_swipe_still_scrolls()
-    test_boundary_and_empty_space_are_ignored()
+    test_no_dead_band_and_empty_space_is_ignored()
+    test_list_edges_reach_four_pixels()
+    test_second_word_reachable_with_reading_offsets()
     test_letters_and_back_unchanged()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

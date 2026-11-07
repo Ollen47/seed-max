@@ -343,6 +343,25 @@ def test_blocked_rect_unit():
         time.sleep(0.01)
     check(codes == [] and armed_at is not None and armed_at < 0.1, f"DOWN on the blocked band: no code, guard armed at {armed_at}")
     check(not hw.touch_require_release, "and released again once the panel has been quiet")
+
+    # 0026: lands just above the band (y 270), settles on it (y 286, within the tap slop)
+    def press_landing_above_the_band(blocked_rect):
+        install_touch([(5, None)])
+        hw.begin_screen(touch_handler=lambda e: (e.x, e.y) if e.is_tap else None)
+        hw.touch_require_release = False
+        hw.touch_screen_started = 0
+        hw.set_touch_blocked_rect(blocked_rect)
+        hw.touch_device = FakeTouch([(0.03, (240, 270)), (0.15, (240, 286)), (5, None)])
+        codes = []
+        deadline = time.time() + 0.6
+        while time.time() < deadline:
+            codes += hw._touch_codes(hw.poll_touch())
+            time.sleep(0.01)
+        return codes
+    codes = press_landing_above_the_band(None)
+    check(codes == [(240, 286)], f"without a toast the tap counts where it settled: {codes}")
+    codes = press_landing_above_the_band((0, 274, 480, 320))
+    check(codes == [], f"landed above the toast, settled on it: nothing reaches the screen under it ({codes})")
     hw.set_touch_blocked_rect(None)
 
 

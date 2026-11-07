@@ -206,6 +206,11 @@ class HardwareButtons(Singleton):
                     # Landed on a toast: dismiss only (the toast thread sees it on PENIRQ)
                     self.guard_until_release()
                     return []
+            # 0026: a tap is hit-tested where the press settled, which can be a few px
+            # from where it landed: one that landed just outside the toast but settled on
+            # it must not reach what is under the toast either
+            events = [event for event in events
+                      if not (event.is_tap and rect_contains(blocked, event.x, event.y))]
 
         return events
 

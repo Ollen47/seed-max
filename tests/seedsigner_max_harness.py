@@ -72,6 +72,14 @@ class TestRenderer(Renderer):
 # ---------------------------------------------------------------------------------------
 # Scripted touch panel
 # ---------------------------------------------------------------------------------------
+class ScriptExhausted(BaseException):
+    """
+    The scripted touches have run out. A BaseException, not an Exception: since 0024
+    HardwareButtons reads a failing panel as "no finger" (except Exception), which would
+    swallow it and leave the screen waiting forever instead of failing the check.
+    """
+
+
 class FakeTouch:
     """
     Stands in for the XPT2046: a script of (seconds, point or None) segments replayed
@@ -91,7 +99,7 @@ class FakeTouch:
     def read(self):
         t = time.monotonic() - self.t0
         if t > self.timeout_s:
-            raise TimeoutError("scripted touch input exhausted")
+            raise ScriptExhausted("scripted touch input exhausted")
         for duration, point in self.segments:
             if t < duration:
                 return point(t) if callable(point) else point
@@ -409,7 +417,9 @@ def test_input_guard():
     """
     hw, touch = setup_inputs()
     screen = _menu(show_back_button=False)
-    touch.set_script([(0.7, _button_center(screen, 2)), (0.1, None)] + tap(_button_center(screen, 1)))
+    # Since 0024 the guard also waits for TOUCH_QUIET_MS (250 ms) without contact after
+    # the lift: the deliberate tap comes 0.35 s after it
+    touch.set_script([(0.7, _button_center(screen, 2)), (0.35, None)] + tap(_button_center(screen, 1)))
     started = time.monotonic()
     result = screen.display()
     check(result == 1, f"finger held across screens ignored, deliberate tap counts: {result!r}")
@@ -473,7 +483,8 @@ def test_hold_to_confirm():
     button = _button_center(screen, 0)
     x, y = button
     touch.set_script(GUARD
-        + tap(button, down=0.3, up=0.3)                       # a firm tap: not enough
+        + tap(button, down=0.3, up=0.5)                       # a firm tap: not enough
+                                                              # (then 250 ms quiet: 0024 guard)
         + drag(button, (x, y - 120), duration=0.6)            # press, then slide off: cancelled
         + [(0.2, None), (1.3, button), (0.2, None)])          # held for the full second
     started = time.monotonic()
@@ -547,7 +558,7 @@ def test_passphrase_screen():
     # Stop before saving to take a screenshot of the typed passphrase
     try:
         screen.display()
-    except TimeoutError:
+    except ScriptExhausted:
         pass
     check(screen.passphrase == "ab7Z Q", f"typed a, b, 123 > 7, abc > ABC > Z, space, Q: {screen.passphrase!r}")
     screenshot("max_passphrase_typed.png")
@@ -623,7 +634,7 @@ def test_mnemonic_entry_screen():
                      + tap(_key_center(kb, kb.KEY_BACKSPACE["code"])) + tap(_key_center(kb, "a")) + [(0.3, None)])
     try:
         screen.display()
-    except TimeoutError:
+    except ScriptExhausted:
         pass
     check("".join(screen.letters).strip() == "ma", f"m, u, (x inactive), DEL, a: {''.join(screen.letters)!r}")
     screenshot("max_mnemonic_typed.png")
@@ -637,6 +648,43 @@ def test_mnemonic_entry_screen():
 # ---------------------------------------------------------------------------------------
 # Camera loops, QR display
 # ---------------------------------------------------------------------------------------
+def test_word_tap_with_a_landing_offset():
+    """
+    0026, the report of 6 Nov 2026 end to end: real HardwareButtons, real seed word
+    screen, taps replayed in real time. The stylus lands 12 px below the second word (the
+    first readings of a press are pulled off) and then settles on it: the word is chosen.
+    Before 0026 the tap was hit-tested at the landing point, in the dead band below it.
+    """
+    from seedsigner.gui.components import GUIConstants
+    from seedsigner.gui.screens.seed_screens import SeedMnemonicEntryScreen
+    wordlist = Seed.get_wordlist(SettingsConstants.WORDLIST_LANGUAGE__ENGLISH)
+    hw, touch = setup_inputs()
+    screen = SeedMnemonicEntryScreen(title="Seed Word #1", initial_letters=["a"], wordlist=wordlist)
+    kb = screen.keyboard
+    # 'b' typed: the highlighted word is 'baby', the second 'bachelor'
+    bachelor_middle = 185
+    x = screen.matches_list_x + GUIConstants.COMPONENT_PADDING + 20
+    # +15 and -12 land outside the zone of 'bachelor' (175-197: 'bacon' below, the
+    # highlighted 'baby' above): only the steady part of the press can choose it
+    for offset in (12, 15, -12):
+        hw, touch = setup_inputs()
+        screen = SeedMnemonicEntryScreen(title="Seed Word #1", initial_letters=["a"], wordlist=wordlist)
+        kb = screen.keyboard
+        landing = [(0.03, (x, bachelor_middle + offset))]
+        settled = [(0.12, (x, bachelor_middle)), (0.15, None)]
+        touch.set_script(GUARD + tap(_key_center(kb, "b")) + [(0.3, None)] + landing + settled)
+        result = screen.display()
+        check(result == "bachelor", f"stylus lands {offset:+d} px off, settles on 'bachelor': {result!r}")
+
+    hw, touch = setup_inputs()
+    screen = SeedMnemonicEntryScreen(title="Seed Word #1", initial_letters=["a"], wordlist=wordlist)
+    kb = screen.keyboard
+    # A very short tap (no steady part): hit-tested where it landed, 9 px low, still 'bachelor'
+    touch.set_script(GUARD + tap(_key_center(kb, "b")) + [(0.3, None)] + [(0.04, (x, bachelor_middle + 9)), (0.15, None)])
+    result = screen.display()
+    check(result == "bachelor", f"a short tap 9 px below 'bachelor' still chooses it: {result!r}")
+
+
 def test_camera_loops_get_touch_input():
     from seedsigner.gui.screens.tools_screens import ToolsImageEntropyLivePreviewScreen, ToolsImageEntropyFinalImageScreen
     from seedsigner.gui.screens.scan_screens import ScanScreen
@@ -866,7 +914,8 @@ def test_skip_multisig_change_check_needs_a_hold():
     screen = change_screen()
     skip = _button_center(screen, 1)
     verify = _button_center(screen, 0)
-    touch.set_script(GUARD + tap(skip, down=0.3, up=0.3) + tap(verify))
+    # up=0.5: after a cancelled hold the 0024 guard wants 250 ms without contact
+    touch.set_script(GUARD + tap(skip, down=0.3, up=0.5) + tap(verify))
     check(screen.display() == 0, "a tap on 'Skip verification' does nothing, a tap on 'Verify' verifies")
 
     hw, touch = setup_inputs()
@@ -997,7 +1046,7 @@ def test_hold_hint_doesnt_eat_the_next_press():
         touch.set_script(GUARD + tap(a, down=0.2, up=gap) + [(second_down, b), (0.2, None)], timeout_s=3.5)
         try:
             result = screen.display()
-        except TimeoutError:
+        except ScriptExhausted:
             result = "lost"
         for toast in toasts:
             toast.join(3)
@@ -1518,6 +1567,7 @@ if __name__ == "__main__":
     test_passphrase_screen()
     test_shuffled_passphrase_keys()
     test_mnemonic_entry_screen()
+    test_word_tap_with_a_landing_offset()
     test_camera_loops_get_touch_input()
     test_qr_display_centered()
     test_qr_display_touch_controls()

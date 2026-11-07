@@ -22,8 +22,13 @@ Design choices that matter for a signing device:
 - A tap is a press and release without moving: once the finger travels more than
   TAP_SLOP_PX it becomes a drag and can no longer trigger anything on release. Sliding
   off a button is the way to change your mind, as on a phone.
-- Taps are hit-tested at the point where the finger landed, not where it left: the
-  last samples before a release are the least reliable ones.
+- Taps are hit-tested at the steady part of the press: the median of its samples
+  without the first TAP_DROP_FIRST (landing: the pressure is still building up and the
+  reading is pulled off, which is why the calibration drops them too, PRESS_DROP_FIRST)
+  and without the last TAP_DROP_LAST (lift-off: the least reliable of all). A tap too
+  short to have a steady part is hit-tested where it landed, as before. Measuring taps
+  the way the calibration measures its crosses keeps the two in step: on the real panel
+  the landing samples read a stylus tap several pixels off (6 Nov 2026).
 - Vertical drags are reported as SWIPE steps, one per SWIPE_STEP_PX, which scrolling
   lists translate into one row each.
 """
@@ -78,6 +83,10 @@ class TouchTracker:
     RELEASE_MS = 60           # ... spanning at least this long before a release counts
     TAP_SLOP_PX = 20          # ~3 mm on the 3.5" panel, ~3.5 mm on the 4.0"
     SWIPE_STEP_PX = 44        # one list row (40 px button + 4 px gap)
+    TAP_DROP_FIRST = 3        # landing samples left out of a tap's position (= PRESS_DROP_FIRST)
+    TAP_DROP_LAST = 2         # lift-off samples left out of a tap's position
+    TAP_MIN_STEADY = 3        # fewer steady samples than this: the landing point is used
+    TAP_MAX_SAMPLES = 50      # samples kept per press (~0.5 s), enough for any tap
 
     def __init__(self):
         self.reset()
@@ -90,6 +99,7 @@ class TouchTracker:
         self._empty_since_ms = None
         self._recent = deque(maxlen=3)
         self._down_pos = None
+        self._press_samples = []
         self._last_pos = None
         self._down_ms = 0
         self._dragging = False
@@ -119,6 +129,20 @@ class TouchTracker:
         return (xs[len(xs) // 2], ys[len(ys) // 2])
 
 
+    def _tap_position(self) -> tuple[int, int]:
+        """
+        Where a tap is hit-tested: the median of the steady samples of the press, i.e.
+        without the first TAP_DROP_FIRST and the last TAP_DROP_LAST. The landing point
+        if fewer than TAP_MIN_STEADY are left (a very short tap).
+        """
+        steady = self._press_samples[self.TAP_DROP_FIRST:len(self._press_samples) - self.TAP_DROP_LAST]
+        if len(steady) < self.TAP_MIN_STEADY:
+            return self._down_pos
+        xs = sorted(p[0] for p in steady)
+        ys = sorted(p[1] for p in steady)
+        return (xs[len(xs) // 2], ys[len(ys) // 2])
+
+
     def feed(self, point: tuple[int, int] | None, now_ms: int) -> list[TouchEvent]:
         """
         Feed one sample: the calibrated (x, y) of the finger, or None if nobody is
@@ -138,12 +162,16 @@ class TouchTracker:
                     self._pending_down = 0
                     pos = self._median_position()
                     self._down_pos = pos
+                    # The samples that made the contact are the first of the press
+                    self._press_samples = list(self._recent)[-self.CONTACT_SAMPLES:]
                     self._last_pos = pos
                     self._down_ms = now_ms
                     self._dragging = False
                     self._swipe_anchor_y = pos[1]
                     events.append(TouchEvent(TouchEvent.TYPE__DOWN, pos[0], pos[1]))
             else:
+                if len(self._press_samples) < self.TAP_MAX_SAMPLES:
+                    self._press_samples.append((int(point[0]), int(point[1])))
                 pos = self._median_position()
                 self._last_pos = pos
                 if not self._dragging:
@@ -171,10 +199,13 @@ class TouchTracker:
                 if self._empty_since_ms is None:
                     self._empty_since_ms = now_ms
                 if self._pending_up >= self.RELEASE_SAMPLES and now_ms - self._empty_since_ms >= self.RELEASE_MS:
+                    # The steady part of the press (see module docstring); a drag ends
+                    # with tap=False, its position doesn't matter to anyone
+                    up_pos = self._tap_position() if not self._dragging else self._down_pos
                     events.append(TouchEvent(
                         TouchEvent.TYPE__UP,
-                        self._down_pos[0],     # where the finger landed: see module docstring
-                        self._down_pos[1],
+                        up_pos[0],
+                        up_pos[1],
                         tap=not self._dragging,
                         duration_ms=now_ms - self._down_ms,
                     ))
