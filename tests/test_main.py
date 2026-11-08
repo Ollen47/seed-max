@@ -1,50 +1,35 @@
-import logging
-import pytest
+"""
+Anti-Klepto Check (verifier SD): `src/main.py` starts the nonce verifier, never the
+SeedSigner Controller. Replaces upstream's test_main.py, which drove the Controller (on
+this image main() starts the verifier, and that test would hang).
+"""
+import os
+import subprocess
 import sys
-from unittest.mock import patch, call
+from unittest.mock import patch
 
-# Must import from base.py before any other SeedSigner dependency to mock out certain imports
-from base import BaseTest
-
-sys.path.insert(0,'src')
-from main import main
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(REPO, "src"))
 
 
-class TestMain(BaseTest):
+def test_main_starts_the_verifier():
+    import main
+    with patch("nonceverify.app.main") as verifier_main:
+        main.main([])
+    verifier_main.assert_called_once_with()
+
+
+def test_main_does_not_load_the_signer():
     """
-    The `main.Controller` has to be patched / mocked out otherwise the virtual SeedSigner
-    will just keep running and cause the test to hang.
+    The verifier's modules, as main() loads them at boot, pull in no SeedSigner
+    controller, view or seed code, no embit and no urtypes
     """
-    @patch("main.Controller")
-    def test_main__argparse__default(self, patched_controller):
-        main([])
-        assert logging.root.level == logging.INFO
-        assert logging.getLogger().getEffectiveLevel() == logging.INFO
-        patched_controller.assert_has_calls(
-            [call.get_instance(), call.get_instance().start()]
-        )
-
-
-    @patch("main.Controller")
-    def test_main__argparse__enable_debug_logging(self, patched_controller):
-        main(["--loglevel", "DEBUG"])
-        assert logging.root.level == logging.DEBUG
-        assert logging.getLogger().getEffectiveLevel() == logging.DEBUG
-        patched_controller.assert_has_calls(
-            [call.get_instance(), call.get_instance().start()]
-        )
-
-
-    def test_main__argparse__invalid_arg(self):
-        with pytest.raises(SystemExit):
-            main(["--invalid"])
-
-
-    @patch("main.Controller")
-    def test_main__logging__writes_to_stderr(self, patched_controller, capsys):
-        main([])
-        _, err = capsys.readouterr()
-        assert "Starting SeedSigner" in err and "INFO" in err
-        patched_controller.assert_has_calls(
-            [call.get_instance(), call.get_instance().start()]
-        )
+    code = (
+        "import sys; sys.path.insert(0, 'src'); import main, nonceverify.app, nonceverify.hw; "
+        "bad = [m for m in sys.modules if m.startswith(('seedsigner.controller', 'seedsigner.views', "
+        "'seedsigner.models.seed', 'embit', 'urtypes'))]; "
+        "print(bad); sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
+                            timeout=60, cwd=REPO)
+    assert result.returncode == 0, result.stdout + result.stderr
