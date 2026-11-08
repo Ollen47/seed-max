@@ -698,7 +698,9 @@ def _ur_key(tagged) -> str:
     if not isinstance(tagged, Tag) or tagged.tag != TAG__HDKEY or not isinstance(tagged.value, dict):
         raise DescriptorError("crypto-output: only extended keys are supported")
     m = tagged.value
-    if m.get(1) or 2 in m:
+    # is-master (1) and is-private (2) may be written as explicit "false" (Sparrow does):
+    # only a true value means a master or private key
+    if m.get(1) is True or m.get(2) is True or (2 in m and not isinstance(m[2], bool)):
         raise DescriptorError("crypto-output: private or master key")
     key, chain = m.get(3), m.get(4)
     if not isinstance(key, bytes) or len(key) != 33 or not isinstance(chain, bytes) or len(chain) != 32:

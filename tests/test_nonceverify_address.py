@@ -325,3 +325,34 @@ def test_review_fixes_derivation_shown_and_mixed_branches_refused():
         A.parse_descriptor(body[:first] + "/<1;0>/*" + body[first + 8:])
     with pytest.raises(A.DescriptorError):
         A.parse_descriptor(body.replace("<0;1>", "<0;1;2>"))
+
+
+def test_crypto_output_with_explicit_false_flags_like_sparrow(monkeypatch):
+    """
+    Device test, 8 Nov 2026: Sparrow's PDF QR was refused as "private or master key".
+    Its crypto-hdkey writes is-master / is-private as explicit false: those are fine;
+    only true (or a non-boolean) is refused.
+    """
+    from urtypes.crypto.hd_key import HDKey as URHDKey
+    real = URHDKey.to_data_item
+
+    def with_flags(self):
+        item = real(self)
+        item[1] = False
+        item[2] = False
+        return item
+    monkeypatch.setattr(URHDKey, "to_data_item", with_flags)
+    text, roots = multisig_descriptor()
+    enc, _ = _crypto_output_ur(text, children=False, names=True)
+    c = transport.DescriptorCollector()
+    c.add(enc.next_part().encode())
+    assert c.result.threshold == 2 and A.check_seed_in_descriptor(c.result, master()).ours
+
+    def private(self):
+        item = real(self)
+        item[2] = True
+        return item
+    monkeypatch.setattr(URHDKey, "to_data_item", private)
+    enc, _ = _crypto_output_ur(text, children=False)
+    with pytest.raises(A.DescriptorError, match="private"):
+        transport.DescriptorCollector().add(enc.next_part().encode())
