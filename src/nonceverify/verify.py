@@ -613,8 +613,15 @@ def _is_change(finder, out, meta) -> bool:
 # Whole PSBT
 # ---------------------------------------------------------------------------------------
 def txid(psbt: PSBT) -> str:
+    """
+    The txid of the transaction as it will be broadcast: with the final scriptSigs of
+    nested segwit inputs (P2SH-P2WPKH / P2SH-P2WSH), which are part of the txid.
+    """
+    from dataclasses import replace
     from nonceverify.psbt import _serialize_no_witness
-    return crypto.dsha256(_serialize_no_witness(psbt.tx))[::-1].hex()
+    tx = replace(psbt.tx, inputs=[replace(txin, script_sig=inp.final_script_sig or txin.script_sig)
+                                  for txin, inp in zip(psbt.tx.inputs, psbt.inputs)])
+    return crypto.dsha256(_serialize_no_witness(tx))[::-1].hex()
 
 
 def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=None,

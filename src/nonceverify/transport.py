@@ -24,6 +24,7 @@ class TransportError(ValueError):
 
 FINAL_TX_MESSAGE = ("this QR is a final transaction, without amounts or paths: the signed PSBT is "
                     "needed (Sparrow: File > Show PSBT as QR, before broadcasting)")
+NOT_FINAL_TX_MESSAGE = "this QR is not a final transaction"
 
 
 def looks_like_final_tx(raw: bytes) -> bool:
@@ -326,8 +327,11 @@ class PSBTCollector:
         m = _BBQR_RE.match(text)
         if m:
             return self._add_bbqr(m, text)
-        if len(text) > 120 and re.fullmatch(r"0[12]000000[0-9a-fA-F]+", text):
-            raise TransportError(FINAL_TX_MESSAGE)
+        if len(text) > 120 and len(text) % 2 == 0 and re.fullmatch(r"0[12]000000[0-9a-fA-F]+", text):
+            # v7.2: a final transaction in hex; check_psbt pairs it with the unsigned PSBT
+            self.result = bytes.fromhex(text)
+            self.kind = "hex"
+            return True
         if text.startswith("cHNidP"):
             try:
                 self.result = base64.b64decode(text, validate=True)
@@ -377,9 +381,7 @@ class PSBTCollector:
 
     def _add_bbqr(self, m, text: str) -> bool:
         encoding, file_type, total, index = m.group(1), m.group(2), int(m.group(3), 36), int(m.group(4), 36)
-        if file_type == "T":
-            raise TransportError(FINAL_TX_MESSAGE)
-        if file_type != "P":
+        if file_type not in ("P", "T"):         # T: a final transaction (v7.2)
             raise TransportError("this BBQr QR does not contain a PSBT")
         if total < 1 or index >= total:
             raise TransportError("invalid BBQr part")

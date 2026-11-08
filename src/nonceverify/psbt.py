@@ -460,3 +460,31 @@ def parse_multisig(ws: bytes):
     if i != len(ws) - 2 or len(keys) != n:
         return None
     return m, keys
+
+
+def has_signatures(psbt: PSBT) -> bool:
+    return any(i.partial_sigs or i.final_witness or i.final_script_sig for i in psbt.inputs)
+
+
+def combine_final_tx(psbt: PSBT, raw_tx: bytes) -> PSBT:
+    """
+    v7.2. Some signers (Coldcard Q with a fully signed transaction) hand back the final
+    transaction instead of the signed PSBT: no amounts, scripts or paths, so the
+    signatures can't be checked from it alone. Paired with the UNSIGNED PSBT of the same
+    transaction (amounts, scripts, paths), its scriptSigs and witnesses become the PSBT's
+    final fields, and the usual checks run on exactly the signatures that will be
+    broadcast. Nothing in the PSBT is trusted more than before: wrong amounts or scripts
+    make the signatures invalid, i.e. red.
+    """
+    final = parse_tx(raw_tx)
+    if not final.same_transaction(psbt.tx) or len(final.inputs) != len(psbt.inputs):
+        raise PSBTError("the final transaction and the PSBT are not the same transaction "
+                        "(inputs, outputs, amounts, sequence, version or locktime differ)")
+    if any(i.final_witness or i.final_script_sig for i in psbt.inputs):
+        raise PSBTError("the PSBT is already finalized: scan the unsigned PSBT")
+    for inp, txin in zip(psbt.inputs, final.inputs):
+        if txin.witness:
+            inp.final_witness = list(txin.witness)
+        if txin.script_sig:
+            inp.final_script_sig = txin.script_sig
+    return psbt

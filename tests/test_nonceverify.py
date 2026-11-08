@@ -185,8 +185,12 @@ def test_bbqr_and_base64():
         for p in parts + parts[:1]:
             c.add(p.encode())
         assert c.result == payload
-    with pytest.raises(transport.TransportError, match="final transaction"):
-        transport.PSBTCollector().add(bbqr_parts(os.urandom(80), "T")[0])
+    # v7.2: a final transaction (BBQr "T") is collected too: check_psbt pairs it with the
+    # unsigned PSBT
+    final = b"\x02\x00\x00\x00" + os.urandom(80)
+    c = transport.PSBTCollector()
+    c.add(bbqr_parts(final, "T")[0])
+    assert c.result == final and transport.looks_like_final_tx(c.result)
     c = transport.PSBTCollector()
     c.add(base64.b64encode(b"psbt\xff" + b"x" * 30))
     assert c.result == b"psbt\xff" + b"x" * 30

@@ -15,7 +15,7 @@ import time
 
 from nonceverify import address, crypto, seedqr, transport, ui, wordentry
 from nonceverify.hw import HEIGHT, WIDTH, Event, QRDecoderError, decode_qr
-from nonceverify.psbt import PSBTError, parse_psbt
+from nonceverify.psbt import PSBTError, combine_final_tx, has_signatures, parse_psbt, parse_tx
 from nonceverify.verify import (GRIND__EMBIT, GRIND__LIBSECP, GRIND__NONE, STATUS__FAIL, STATUS__FOREIGN,
     STATUS__OK, STATUS__UNSIGNED, STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__OK, verify_psbt)
 
@@ -793,9 +793,31 @@ def check_psbt(hw, session: Session) -> str:
     if ScanScreen(heading, on_payload).run(hw) is None:
         return "back"
     try:
-        if transport.looks_like_final_tx(collector.result):
-            raise PSBTError(transport.FINAL_TX_MESSAGE)
-        psbt = parse_psbt(collector.result)
+        first = collector.result
+        if transport.looks_like_final_tx(first):
+            # v7.2: a final transaction (Coldcard Q): its unsigned PSBT gives the amounts
+            parse_tx(first)
+            ui.MessageScreen("Final transaction read",
+                             "The signer returned the final transaction (Coldcard Q does). Now scan the "
+                             "UNSIGNED PSBT of the same transaction from Sparrow: it carries the amounts "
+                             "and paths needed to check the signatures.",
+                             buttons=("Scan unsigned PSBT",), heading_color=ui.ACCENT, icon_name="camera").run(hw)
+            unsigned = scan_second(hw, "Unsigned PSBT", final=False)
+            if unsigned is None:
+                return "back"
+            psbt = combine_final_tx(parse_psbt(unsigned), first)
+        else:
+            psbt = parse_psbt(first)
+            if not has_signatures(psbt):
+                ui.MessageScreen("Unsigned PSBT read",
+                                 "This PSBT has no signatures. If the signer returned the final transaction "
+                                 "(Coldcard Q), scan it now from Sparrow.",
+                                 buttons=("Scan final transaction",), heading_color=ui.ACCENT,
+                                 icon_name="camera").run(hw)
+                final = scan_second(hw, "Final transaction", final=True)
+                if final is None:
+                    return "back"
+                psbt = combine_final_tx(psbt, final)
         working = WorkingScreen(hw)
         report = verify_psbt(psbt, session.master, progress=working, scan_progress=working.scan,
                              grinding=signer_grinding(session.signer))
@@ -819,6 +841,28 @@ def check_psbt(hw, session: Session) -> str:
                                  "the one Sparrow would broadcast. Do not broadcast.")
             lock_after_red(session, report)
     return ResultScreen(report, session.signer, txid_confirmed=confirmed).run(hw)
+
+
+def scan_second(hw, heading: str, final: bool):
+    """ The second QR of a final transaction + unsigned PSBT pair (v7.2), raw bytes or None """
+    state = {"collector": transport.PSBTCollector(), "result": None}
+
+    def on_payload(payload):
+        collector = state["collector"]
+        collector.restarted = False
+        collector.add(payload)
+        if collector.complete:
+            state["collector"] = transport.PSBTCollector()         # wrong kind: start clean
+            if transport.looks_like_final_tx(collector.result) != final:
+                raise transport.TransportError(transport.NOT_FINAL_TX_MESSAGE if final else
+                                               "this is the final transaction again: scan the unsigned PSBT")
+            state["result"] = collector.result
+            return True, 1.0, ""
+        return False, collector.progress, "QR of another PSBT: starting over" if collector.restarted else ""
+
+    if ScanScreen(heading, on_payload).run(hw) is None:
+        return None
+    return state["result"]
 
 
 def lock_after_red(session: Session, report):
