@@ -30,7 +30,7 @@ from test_nonceverify_ui import (COLDCARD_Q, FULL, LEFT, MIDDLE, RIGHT, SAME_TXI
 from test_nonceverify_address import OTHER1, multisig_descriptor                  # noqa: E402
 
 SINGLE = ("tap", 122, 194)          # AddressModeScreen
-MULTI = ("tap", 357, 194)
+MULTI = ("tap", 240, 194)
 BACK_FROM_CAMERA = ("tap", 40, 240)
 
 

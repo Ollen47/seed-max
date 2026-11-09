@@ -515,14 +515,14 @@ class AddressModeScreen(ui.Screen):
     def __init__(self, descriptor=None):
         super().__init__()
         self.descriptor = descriptor
-        self.buttons = ui.button_row(["Single-sig", "Multisig"], 166, height=56, values=["single", "descriptor"],
-                                     icons=["fingerprint", "key"])
+        self.buttons = ui.button_row(["Single-sig", "Multisig", "Explorer"], 166, height=56,
+                                     values=["single", "descriptor", "explorer"], icons=["fingerprint", "key", "qr"])
         self.buttons += ui.bottom_row(["Back"], values=["back"], icons=["back"])
 
     def draw(self, d, image):
         ui.title(d, "Check an address")
-        ui.paragraph(d, "Is the address that Sparrow shows (to receive, or a change address) really "
-                        "this wallet's? It is searched by derivation from the seed.", ui.TOP + 34, size=16,
+        ui.paragraph(d, "Check: is the address Sparrow shows really this wallet's? Explorer: list the "
+                        "wallet's addresses, derived here from the seed, with their QR.", ui.TOP + 34, size=16,
                      color=ui.DIM)
         note = ("Multisig: the descriptor scanned this session is used: "
                 + self.descriptor.describe()) if self.descriptor else \
@@ -644,6 +644,198 @@ class AddressResultScreen(ui.Screen):
         return super().on_event(event)
 
 
+# ---------------------------------------------------------------------------------------
+# v7.3: address explorer
+# ---------------------------------------------------------------------------------------
+EXPLORER_PAGE = 6
+EXPLORER_MAX_INDEX = 0x7FFFFFFF - EXPLORER_PAGE
+EXPLORER_MAX_ACCOUNT = 99
+
+
+def indexed(explorer) -> bool:
+    """ Addresses numbered by an index (a descriptor without /* has a single address) """
+    return getattr(explorer, "wildcard", lambda: True)()
+
+
+def short_address(text: str, f, width: int) -> str:
+    """ The address in groups of four, the middle elided if it doesn't fit """
+    full = address.grouped(text)
+    if ui.text_width(full, f) <= width:
+        return full
+    groups = full.split(" ")
+    return " ".join(groups[:4]) + " … " + " ".join(groups[-2:])
+
+
+def address_qr(text: str, size: int):
+    """
+    A QR code of `text` at most `size` pixels wide, or None. Made with the `qrcode`
+    package that SeedSigner OS ships (public data only), then read back with the same
+    zbar decoder as the camera: if what it reads isn't exactly the address shown, no QR
+    is shown at all.
+    """
+    try:
+        import qrcode
+        from PIL import Image
+        upper = text.upper() if text.lower().startswith(("bc1", "tb1", "bcrt1")) else text
+        q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2, box_size=1)
+        q.add_data(upper)
+        q.make(fit=True)
+        modules = q.make_image(fill_color="black", back_color="white").convert("RGB")
+        scale = max(1, size // modules.size[0])
+        image = modules.resize((modules.size[0] * scale, modules.size[1] * scale), Image.NEAREST)
+        payload = decode_qr(image)
+    except QRDecoderError:
+        raise
+    except Exception as e:
+        logger.info(f"address QR not available: {type(e).__name__}")
+        return None
+    if payload is None or payload.decode("ascii", "replace").lower() != text.lower():
+        logger.info("address QR self-check failed")
+        return None
+    return image
+
+
+class ExplorerWalletScreen(ui.Screen):
+    header_label = "EXPLORER"
+
+    def __init__(self, descriptor=None):
+        super().__init__()
+        self.descriptor = descriptor
+        self.buttons = ui.button_row(["Native bc1q · 84", "Nested 3… · 49"], ui.TOP + 40, height=56,
+                                     values=["84", "49"])
+        self.buttons += ui.button_row(["Legacy 1… · 44", "Multisig"], ui.TOP + 106, height=56,
+                                      values=["44", "multisig"], icons=[None, "key"])
+        self.buttons += ui.bottom_row(["Back"], values=["back"], icons=["back"])
+
+    def draw(self, d, image):
+        ui.title(d, "Which addresses?")
+        note = ("Multisig: " + self.descriptor.describe()) if self.descriptor else \
+            "Multisig: you scan the descriptor from your paper backup first."
+        ui.paragraph(d, note, ui.TOP + 176, size=14, color=ui.DIM, max_lines=2)
+
+
+class ExplorerListScreen(ui.Screen):
+    header_label = "EXPLORER"
+    ROW_TOP = ui.TOP + 66
+    ROW_H = 26
+
+    def __init__(self, explorer, change: bool, start: int, singlesig: bool):
+        super().__init__()
+        self.explorer, self.change, self.start = explorer, change, start
+        self.rows = [explorer.address(change, start + i) for i in range(EXPLORER_PAGE)] \
+            if indexed(explorer) else [explorer.address(change, 0)]
+        top = ui.TOP + 2
+        self.buttons = [ui.Button((ui.PAD, top, 150, top + 38), "Change" if change else "Receive",
+                                  value="toggle", size=17, primary=change)]
+        if singlesig:
+            self.buttons += [ui.Button((160, top, 204, top + 38), "−", value="acct-", size=22),
+                             ui.Button((290, top, 334, top + 38), "+", value="acct+", size=22)]
+        self.buttons.append(ui.Button((WIDTH - ui.PAD - 120, top, WIDTH - ui.PAD, top + 38), "Go to #",
+                                      value="goto", size=17))
+        self.buttons += ui.bottom_row(["Back", "Prev", "Next"], values=["back", "prev", "next"],
+                                      icons=["back", None, None])
+        self.singlesig = singlesig
+
+    def draw(self, d, image):
+        if self.singlesig:
+            d.text((247, ui.TOP + 21), f"acct {self.explorer.account}", fill=ui.TEXT,
+                   font=ui.font(16, bold=True, mono=True), anchor="mm")
+        d.text((ui.PAD, ui.TOP + 54), self.explorer.label, fill=ui.DIM, font=ui.font(14), anchor="lm")
+        f = ui.font(16, mono=True)
+        for i, (text, steps) in enumerate(self.rows):
+            y = self.ROW_TOP + i * self.ROW_H
+            if i % 2 == 0:
+                d.rectangle((ui.PAD, y, WIDTH - ui.PAD, y + self.ROW_H - 2), fill=ui.PANEL)
+            index = steps[-1] if indexed(self.explorer) else None
+            d.text((ui.PAD + 50, y + self.ROW_H / 2 - 1), f"#{index}" if index is not None else "", fill=ui.ACCENT,
+                   font=ui.font(15, bold=True, mono=True), anchor="rm")
+            d.text((ui.PAD + 58, y + self.ROW_H / 2 - 1), short_address(text, f, WIDTH - 2 * ui.PAD - 62),
+                   fill=ui.TEXT, font=f, anchor="lm")
+
+    def on_event(self, event):
+        value = super().on_event(event)
+        if value is not None:
+            return value
+        if event.kind == Event.SWIPE_UP:
+            return "next"
+        if event.kind == Event.SWIPE_DOWN:
+            return "prev"
+        if event.kind == Event.TAP and self.ROW_TOP <= event.y < self.ROW_TOP + len(self.rows) * self.ROW_H:
+            return ("row", int((event.y - self.ROW_TOP) // self.ROW_H))
+        return None
+
+
+class AddressDetailScreen(ui.Screen):
+    header_label = "EXPLORER"
+    QR_SIZE = 222
+
+    def __init__(self, text: str, where: str, path: str, label: str):
+        super().__init__()
+        self.text, self.where, self.path, self.label = text, where, path, label
+        self.qr = address_qr(text, self.QR_SIZE)
+        self.buttons = ui.bottom_row(["Back"], values=["back"], icons=["back"])
+
+    def draw(self, d, image):
+        x = ui.PAD
+        if self.qr is not None:
+            box = self.QR_SIZE
+            d.rectangle((x, ui.TOP + 2, x + box, ui.TOP + 2 + box), fill=(255, 255, 255))
+            image.paste(self.qr, (x + (box - self.qr.size[0]) // 2, ui.TOP + 2 + (box - self.qr.size[1]) // 2))
+            x += box + 12
+        width = WIDTH - ui.PAD - x
+        d.text((x, ui.TOP + 14), self.where, fill=ui.GREEN, font=ui.font(20, bold=True), anchor="lm")
+        y = ui.TOP + 32
+        for line in ui.wrap(self.path, ui.font(14, mono=True), width)[:2]:
+            d.text((x, y), line, fill=ui.DIM, font=ui.font(14, mono=True))
+            y += 17
+        y += 6
+        size = 18 if self.qr is not None else 22
+        f = ui.font(size, bold=True, mono=True)
+        for line in ui.wrap(address.grouped(self.text), f, width):
+            d.text((x, y), line, fill=ui.TEXT, font=f)
+            y += size + 4
+        if self.qr is None:
+            d.text((x, y + 8), "QR not available: compare the text", fill=ui.YELLOW, font=ui.font(14))
+        d.text((x, ui.TOP + 214), self.label, fill=ui.DIM, font=ui.fit_font(self.label, 13, width), anchor="ls")
+
+
+def explorer_flow(hw, session):
+    while True:
+        choice = ExplorerWalletScreen(session.descriptor).run(hw)
+        if choice not in ("84", "49", "44", "multisig"):
+            return
+        if choice == "multisig":
+            if session.descriptor is None and not load_descriptor(hw, session):
+                continue
+            explorer, singlesig = address.DescriptorExplorer(session.descriptor), False
+        else:
+            explorer, singlesig = address.SinglesigExplorer(session.master, int(choice), 0), True
+        change, start = False, 0
+        while True:
+            value = ExplorerListScreen(explorer, change, start, singlesig).run(hw)
+            if value == "back":
+                break
+            if value == "toggle" and explorer.has_change():
+                change = not change
+            elif value in ("acct-", "acct+") and singlesig:
+                account = min(EXPLORER_MAX_ACCOUNT, max(0, explorer.account + (1 if value == "acct+" else -1)))
+                if account != explorer.account:
+                    explorer, start = address.SinglesigExplorer(session.master, explorer.purpose, account), 0
+            elif value == "prev":
+                start = max(0, start - EXPLORER_PAGE)
+            elif value == "next":
+                start = min(EXPLORER_MAX_INDEX, start + EXPLORER_PAGE)
+            elif value == "goto":
+                typed = ui.KeyboardScreen("").run(hw)[1].strip()
+                if typed.isdigit() and len(typed) <= 10:
+                    start = min(EXPLORER_MAX_INDEX, int(typed))
+            elif isinstance(value, tuple) and value[0] == "row":
+                text, steps = explorer.address(change, start + value[1] if indexed(explorer) else 0)
+                where = ("change" if change else "receive") + (f" #{steps[-1]}" if indexed(explorer) else "")
+                path = crypto.format_path(steps) if singlesig else "…/" + address.format_steps(steps)
+                AddressDetailScreen(text, where, path, explorer.label).run(hw)
+
+
 def scan_address(hw):
     found = {}
 
@@ -678,6 +870,9 @@ def address_flow(hw, session):
     """ "Address" on the seed screen. Returns when the user goes back to the seed screen """
     while True:
         mode = AddressModeScreen(session.descriptor).run(hw)
+        if mode == "explorer":
+            explorer_flow(hw, session)
+            continue
         if mode not in ("single", "descriptor"):
             return
         if mode == "descriptor" and session.descriptor is None and not load_descriptor(hw, session):

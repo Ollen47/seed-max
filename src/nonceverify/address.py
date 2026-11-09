@@ -864,3 +864,77 @@ def _is_change(desc: Descriptor, branch: int) -> bool:
 
 def format_steps(steps) -> str:
     return "/".join(str(s) for s in steps)
+
+
+# ---------------------------------------------------------------------------------------
+# Explorer (v7.3): list the wallet's addresses, derived on the device
+# ---------------------------------------------------------------------------------------
+class SinglesigExplorer:
+    """
+    Addresses of one single-sig account of the loaded seed. Only the account's public
+    node is kept (the private one is wiped right after the hardened steps).
+    """
+    def __init__(self, master: crypto.HDKey, purpose: int, account: int = 0, network: str = "main"):
+        if purpose not in (84, 49, 44):
+            raise ValueError("unsupported purpose")
+        self.purpose, self.account, self.network = purpose, account, network
+        coin = 1 if network == "test" else 0
+        self.prefix = [purpose | H, coin | H, account | H]
+        node = master.derive(self.prefix)
+        try:
+            point, chain = crypto.pubkey_decode(node.pubkey), node.chain
+        finally:
+            node.wipe()
+        self.branches = [ckd_pub(point, chain, 0), ckd_pub(point, chain, 1)]
+        self.script_of = {84: p2wpkh, 49: lambda pk: p2sh(p2wpkh(pk)), 44: p2pkh}[purpose]
+
+    @property
+    def label(self) -> str:
+        name = {84: "BIP84 native segwit", 49: "BIP49 nested segwit", 44: "BIP44 legacy"}[self.purpose]
+        return f"{name} · account {self.account}"
+
+    def has_change(self) -> bool:
+        return True
+
+    def address(self, change: bool, index: int):
+        """ (address text, full path) """
+        point, chain = self.branches[1 if change else 0]
+        child, _c = ckd_pub(point, chain, index)
+        spk = self.script_of(crypto.pubkey_compressed(child))
+        return spk_address(spk, self.network), self.prefix + [1 if change else 0, index]
+
+
+class DescriptorExplorer:
+    """ Addresses of a descriptor (checked against the seed before it gets here) """
+    def __init__(self, desc: Descriptor):
+        self.desc = desc
+        self.nodes = []
+        for b in range(desc.branch_count()):
+            per_key = []
+            for key in desc.keys:
+                point, chain = key.point, key.chain
+                for step in key.branches[b]:
+                    point, chain = ckd_pub(point, chain, step)
+                per_key.append((point, chain))
+            self.nodes.append(per_key)
+
+    @property
+    def label(self) -> str:
+        return self.desc.describe()
+
+    def has_change(self) -> bool:
+        return self.desc.branch_count() > 1
+
+    def wildcard(self) -> bool:
+        return self.desc.keys[0].wildcard
+
+    def address(self, change: bool, index: int):
+        """ (address text, branch steps + index) """
+        b = 1 if change and self.has_change() else 0
+        if self.wildcard():
+            pubs = [crypto.pubkey_compressed(ckd_pub(p, c, index)[0]) for p, c in self.nodes[b]]
+            steps = list(self.desc.keys[0].branches[b]) + [index]
+        else:
+            pubs = [crypto.pubkey_compressed(p) for p, _c in self.nodes[b]]
+            steps = list(self.desc.keys[0].branches[b])
+        return spk_address(self.desc.script_pubkey(b, pubs), self.desc.network), steps
