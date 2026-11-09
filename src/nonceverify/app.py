@@ -54,7 +54,7 @@ def show_spaces(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "7"
+VERSION = "7.4"
 
 
 def btc(sats) -> str:
@@ -72,26 +72,131 @@ def txid_rows(txid: str) -> list:
 # ---------------------------------------------------------------------------------------
 # Screens
 # ---------------------------------------------------------------------------------------
-class SplashScreen(ui.Screen):
-    """ Boot screen: the name of the tool, unmistakably not SeedSigner """
-    def render(self):
-        image, d = ui.new_canvas()
-        # faint grid, like an instrument's screen
-        for x in range(0, WIDTH, 24):
-            d.line((x, 0, x, HEIGHT), fill=(14, 20, 28))
-        for y in range(0, HEIGHT, 24):
-            d.line((0, y, WIDTH, y), fill=(14, 20, 28))
-        ui.emblem(d, WIDTH // 2, 92, 104)
-        ui.spaced(d, (WIDTH / 2, 178), "ANTI-KLEPTO", ui.font(40, bold=True), ui.TEXT, 3)
-        ui.spaced(d, (WIDTH / 2, 218), "CHECK", ui.font(24, bold=True, mono=True), ui.ACCENT, 10)
-        d.text((WIDTH / 2, 258), "RFC 6979 nonce check · address check", fill=ui.DIM,
-               font=ui.font(16), anchor="mm")
-        d.text((WIDTH / 2, 296), f"SeedSigner Max · verifier SD v{VERSION} · tap to start",
-               fill=(70, 82, 96), font=ui.font(13, mono=True), anchor="mm")
-        return image
+SPLASH_FEATURES = (
+    ("RFC 6979 nonce", "signature nonces"),
+    ("Sighash ALL", "no ANYONECANPAY / NONE"),
+    ("Txid match", "compare with Sparrow"),
+    ("Address check", "single-sig & multisig"),
+)
 
-    def on_event(self, event):
-        return "go" if event.kind == Event.TAP else None
+
+def _blend(c0, c1, t: float):
+    return tuple(int(round(c0[i] + (c1[i] - c0[i]) * t)) for i in range(3))
+
+
+def splash_background():
+    """
+    v7.4 (Ollen, 9 Nov 2026): the splash without its START button. A flat grid above a
+    horizon, a teal floor in perspective below it, the emblem with a halo, the name, and a
+    panel with the four checks. Plain PIL drawing, no blur: a few hundred lines and four
+    alpha composites, drawn once per boot and kept.
+    """
+    from PIL import Image, ImageDraw
+    hz = SplashScreen.HORIZON
+    image = Image.new("RGBA", (WIDTH, HEIGHT))
+    d = ImageDraw.Draw(image)
+    sky_top, sky_bottom, floor_bottom = ui.BACKGROUND, (16, 26, 40), (8, 34, 38)
+    for y in range(HEIGHT):
+        color = _blend(sky_top, sky_bottom, y / hz) if y < hz else \
+            _blend(sky_bottom, floor_bottom, (y - hz) / (HEIGHT - hz))
+        d.line((0, y, WIDTH, y), fill=color + (255,))
+
+    lines = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    g = ImageDraw.Draw(lines)
+    for x in range(0, WIDTH, 24):                                   # flat grid in the sky
+        g.line((x, 0, x, hz), fill=(60, 84, 112, 70))
+    for y in range(0, hz, 24):
+        g.line((0, y, WIDTH, y), fill=(60, 84, 112, 70))
+    vx = WIDTH / 2                                                  # floor: rays to the vanishing point
+    for i in range(-16, 17):
+        g.line((vx + i * 6, hz, vx + i * 40, HEIGHT), fill=ui.ACCENT + (110,))
+    y, step = float(hz), 3.0                                        # cross lines, closer as they recede
+    while y < HEIGHT:
+        g.line((0, int(y), WIDTH, int(y)), fill=ui.ACCENT + (int(60 + 140 * (y - hz) / (HEIGHT - hz)),))
+        step *= 1.3
+        y += step
+    for width, alpha in ((13, 22), (9, 40), (5, 90), (2, 255)):    # horizon glow
+        g.line((0, hz, WIDTH, hz), fill=ui.ACCENT + (alpha,), width=width)
+    image.alpha_composite(lines)
+
+    halo = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    h = ImageDraw.Draw(halo)
+    cx, cy = WIDTH // 2, SplashScreen.EMBLEM_CY
+    for r, alpha in ((60, 10), (50, 16), (42, 24), (34, 34)):
+        h.ellipse((cx - r, cy - r, cx + r, cy + r), fill=ui.ACCENT + (alpha,))
+    image.alpha_composite(halo)
+    d = ImageDraw.Draw(image)
+    ui.emblem(d, cx, cy, SplashScreen.EMBLEM_SIZE)
+    ui.spaced(d, (WIDTH / 2, 101), "ANTI-KLEPTO", ui.font(32, bold=True), ui.TEXT, 2)
+    ui.spaced(d, (WIDTH / 2, 127), "CHECK", ui.font(15, bold=True, mono=True), ui.ACCENT, 9)
+
+    x1, y1, x2, y2 = SplashScreen.PANEL
+    glass = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    p = ImageDraw.Draw(glass)
+    p.rounded_rectangle((x1 + 3, y1 + 4, x2 + 3, y2 + 4), radius=10, fill=(0, 0, 0, 120))
+    p.rounded_rectangle((x1, y1, x2, y2), radius=10, fill=ui.PANEL + (232,), outline=(70, 96, 124, 200), width=1)
+    p.line((x1 + 10, y1 + 1, x2 - 10, y1 + 1), fill=(120, 150, 180, 110))
+    p.line((WIDTH / 2, y1 + 10, WIDTH / 2, y2 - 10), fill=ui.LINE + (255,))
+    p.line((x1 + 12, (y1 + y2) / 2, x2 - 12, (y1 + y2) / 2), fill=ui.LINE + (255,))
+    image.alpha_composite(glass)
+    d = ImageDraw.Draw(image)
+    f_name, f_sub = ui.font(13, bold=True), ui.font(10)
+    for i, (name, sub) in enumerate(SPLASH_FEATURES):
+        fx = x1 + 12 + (i % 2) * (WIDTH / 2 - x1)
+        fy = y1 + 17 + (i // 2) * 34
+        check_mark(d, fx + 7, fy, 6)
+        d.text((fx + 19, fy - 5), name, fill=ui.TEXT, font=f_name, anchor="lm")
+        d.text((fx + 19, fy + 8), sub, fill=ui.DIM, font=f_sub, anchor="lm")
+    d.text((WIDTH / 2, 303), f"SeedSigner Max · verifier SD v{VERSION}", fill=ui.DIM,
+           font=ui.font(13, mono=True), anchor="mm")
+    return image.convert("RGB")
+
+
+def check_mark(d, x: float, y: float, r: float, color=ui.ACCENT):
+    """ A tick in a circle, drawn (the fonts have no check glyph) """
+    d.ellipse((x - r, y - r, x + r, y + r), outline=color, width=2)
+    d.line(((x - r * .45, y), (x - r * .1, y + r * .4), (x + r * .5, y - r * .4)), fill=color, width=2)
+
+
+class SplashScreen(ui.Screen):
+    """
+    Boot screen: the name of the tool, unmistakably not SeedSigner, and what it checks.
+    v7.4: it stays until START is tapped (before: any tap, or 4 seconds).
+    """
+    HORIZON = 150
+    EMBLEM_CY = 44
+    EMBLEM_SIZE = 76
+    PANEL = (40, 144, 440, 212)
+    START = (140, 229, 340, 271)
+    _background = None
+
+    def __init__(self):
+        super().__init__()
+        self.buttons = [ui.Button(self.START, "START", value="go", primary=True)]
+
+    @classmethod
+    def background(cls):
+        if cls._background is None:
+            cls._background = splash_background()
+        return cls._background
+
+    def render(self):
+        from PIL import ImageDraw
+        image = self.background().copy()
+        d = ImageDraw.Draw(image)
+        x1, y1, x2, y2 = self.START
+        cy, radius = (y1 + y2) / 2, (y2 - y1) // 2
+        d.rounded_rectangle((x1 - 3, y1 - 3, x2 + 3, y2 + 3), radius=radius + 3, outline=ui.ACCENT_DARK, width=3)
+        d.rounded_rectangle(self.START, radius=radius, fill=ui.ACCENT)
+        d.rounded_rectangle((x1, y1, x2, cy), radius=radius, fill=(110, 240, 224))
+        d.rectangle((x1 + radius, cy - 5, x2 - radius, cy), fill=(70, 234, 212))
+        f = ui.font(19, bold=True)
+        text_w = ui.text_width("START", f)
+        tx = (x1 + x2) / 2 - (text_w + 18) / 2
+        d.text((tx, cy + 1), "START", fill=ui.BACKGROUND, font=f, anchor="lm")
+        ax = tx + text_w + 8
+        d.polygon(((ax, cy - 7), (ax + 11, cy), (ax, cy + 7)), fill=ui.BACKGROUND)
+        return image
 
 
 class HomeScreen(ui.Screen):
@@ -1081,7 +1186,7 @@ def lock_after_red(session: Session, report):
 def run(hw, session: Session = None, splash: bool = True):
     session = session or Session()
     if splash:
-        SplashScreen().run(hw, timeout=4)
+        SplashScreen().run(hw)              # v7.4: until START
     while True:
         if session.master is None:
             method = HomeScreen().run(hw)

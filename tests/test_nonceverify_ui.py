@@ -173,8 +173,11 @@ def compact_seedqr(mnemonic):
     return bip39.mnemonic_to_bytes(mnemonic)
 
 
+SPLASH_START = ("tap", 240, 250)        # v7.4: the splash waits for START
+
+
 def load_seed_script(passphrase=PASSPHRASE, shots=True):
-    script = [("shot", "00_splash"), ("tap", 240, 160), ("shot", "01_home")] if shots else [("tap", 240, 160)]
+    script = [("shot", "00_splash"), SPLASH_START, ("shot", "01_home")] if shots else [SPLASH_START]
     script += [LEFT, ("blank",), ("qr", compact_seedqr(MNEMONIC))]           # home: "SeedQR"
     if shots:
         script += [("shot", "02_seed_read")]
@@ -498,7 +501,7 @@ def test_review_needs_a_valid_checksum():
 
 
 def typed_seed_script(words, shots=True):
-    script = [("tap", 240, 160)]
+    script = [SPLASH_START]
     script += [TYPE_SEED] + ([("shot", "30_word_count")] if shots else [])
     script += [WORDS_12 if len(words) == 12 else WORDS_24]
     for i, w in enumerate(words):
@@ -547,7 +550,7 @@ def test_a_wrong_word_is_caught_and_fixed_from_the_review():
     wrong = list(words)
     wrong[5] = "zoo" if words[5] != "zoo" else "abandon"
     assert not SeedReviewScreen(wrong).valid
-    script = [("tap", 240, 160), TYPE_SEED, WORDS_12]
+    script = [SPLASH_START, TYPE_SEED, WORDS_12]
     for w in wrong:
         script += type_word(w)
     script += [("shot", "37_bad_checksum"), RIGHT]                          # Conferma blocked
@@ -564,7 +567,7 @@ def test_a_wrong_word_is_caught_and_fixed_from_the_review():
 
 def test_back_goes_to_the_previous_word_and_cancel_goes_home():
     words = MNEMONIC.split()
-    script = [("tap", 240, 160), TYPE_SEED, WORDS_12] + type_word("zoo")       # word 1 wrong
+    script = [SPLASH_START, TYPE_SEED, WORDS_12] + type_word("zoo")       # word 1 wrong
     script += [CONTROL["prev"]]                                                 # back to word 1, prefilled "zoo"
     script += [CONTROL["erase"]] * 3 + type_word(words[0])
     for w in words[1:]:
@@ -598,7 +601,7 @@ def test_word_list_is_cleared_after_entry(monkeypatch):
 def test_cancel_asks_before_discarding_typed_words():
     """ "Annulla" sits next to "Cancella": with words typed it asks; "Continua" keeps everything """
     words = MNEMONIC.split()
-    script = [("tap", 240, 160), TYPE_SEED, WORDS_12]
+    script = [SPLASH_START, TYPE_SEED, WORDS_12]
     for w in words[:5]:
         script += type_word(w)
     script += [CONTROL["cancel"], ("shot", "42_confirm"), LEFT]                 # Continua
@@ -611,7 +614,7 @@ def test_cancel_asks_before_discarding_typed_words():
     shot = hw.shots["43_passphrase_question"]
     assert any(shot.getpixel((x, y)) == ui.GREEN for x in range(ui.PAD, ui.PAD + 28) for y in range(ui.TOP + 4, ui.TOP + 28))
     # Annulla on the very first word, nothing typed yet: straight home, no question
-    hw = FakeHardware([("tap", 240, 160), TYPE_SEED, WORDS_12, CONTROL["cancel"], ("shot", "44_home"), ("stop",)])
+    hw = FakeHardware([SPLASH_START, TYPE_SEED, WORDS_12, CONTROL["cancel"], ("shot", "44_home"), ("stop",)])
     with pytest.raises(Stop):
         app.run(hw)
     assert any(hw.shots["44_home"].getpixel((x, 288)) == ui.TEXT for x in range(60, 200)), "home buttons"
@@ -619,7 +622,7 @@ def test_cancel_asks_before_discarding_typed_words():
 
 def test_rivedi_goes_back_to_the_review_unchanged():
     words = MNEMONIC.split()
-    script = [("tap", 240, 160), TYPE_SEED, WORDS_12]
+    script = [SPLASH_START, TYPE_SEED, WORDS_12]
     for w in words:
         script += type_word(w)
     script += [review_tap(words, 3), CONTROL["prev"], ("shot", "45_back_in_review"), RIGHT, ("stop",)]

@@ -55,12 +55,14 @@ class WordEntryScreen(ui.Screen):
     step = 0
     ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
     KEY_W = 46
-    KEY_H = 44
-    KEYS_TOP = 124
-    CAND_TOP = 76
-    CAND_H = 42
+    KEY_H = 42                  # v7.4: 44 -> 42, room for the larger "WORD N of M" row
+    KEYS_TOP = 134
+    CAND_TOP = 94
+    CAND_H = 36
     CAND_SLOTS = 4
-    CONTROLS_TOP = 270
+    CONTROLS_TOP = 272
+    LABEL_CY = ui.TOP + 15      # v7.4: "WORD 5 of 12", the number large, and a progress bar
+    FIELD = (ui.PAD, ui.TOP + 30, WIDTH - ui.PAD, ui.TOP + 54)
 
     def __init__(self, index: int, count: int, text: str = "", back_label: str = "Back"):
         super().__init__()
@@ -93,16 +95,15 @@ class WordEntryScreen(ui.Screen):
         return matches(self.text)[:self.CAND_SLOTS]
 
     def draw(self, d, image):
-        ui.spaced(d, (ui.PAD, ui.TOP + 2), f"WORD {self.index + 1} OF {self.count}",
-                  ui.font(12, bold=True, mono=True), ui.DIM, 1, anchor="lt")
+        self.draw_position(d)
         found = matches(self.text)
-        if self.text:
-            note = f"{len(found)} words" if len(found) > self.CAND_SLOTS else ""
-            d.text((WIDTH - ui.PAD, ui.TOP + 2), note, fill=ui.DIM, font=ui.font(12, mono=True), anchor="rt")
-        d.rounded_rectangle((ui.PAD, ui.TOP + 17, WIDTH - ui.PAD, ui.TOP + 36), radius=4, fill=ui.PANEL,
-                            outline=ui.ACCENT, width=1)
-        d.text((2 * ui.PAD, ui.TOP + 27), self.text + "_", fill=ui.TEXT, font=ui.font(18, bold=True, mono=True),
+        d.rounded_rectangle(self.FIELD, radius=4, fill=ui.PANEL, outline=ui.ACCENT, width=1)
+        field_cy = (self.FIELD[1] + self.FIELD[3]) / 2
+        d.text((2 * ui.PAD, field_cy), self.text + "_", fill=ui.TEXT, font=ui.font(18, bold=True, mono=True),
                anchor="lm")
+        if self.text and len(found) > self.CAND_SLOTS:
+            d.text((WIDTH - 2 * ui.PAD, field_cy), f"{len(found)} words", fill=ui.DIM,
+                   font=ui.font(12, mono=True), anchor="rm")
         for slot, word in enumerate(found[:self.CAND_SLOTS]):
             ui.Button(self.candidate_rect(slot), word, value=("word", word), primary=(len(found) == 1),
                       size=17).draw(d)
@@ -123,6 +124,31 @@ class WordEntryScreen(ui.Screen):
         ui.Button(rects["prev"], self.back_label, size=17, icon_name="back").draw(d)
         ui.Button(rects["erase"], "Delete", size=17, icon_name="erase").draw(d)
         ui.Button(rects["cancel"], "Cancel", size=17).draw(d)
+
+    def bar_segments(self):
+        """ v7.4: one segment per word, right of the "WORD N of M" label """
+        x1, x2 = self.BAR_LEFT, WIDTH - ui.PAD
+        gap = 3 if self.count <= 12 else 2
+        width = (x2 - x1 - gap * (self.count - 1)) / self.count
+        y = self.LABEL_CY - 5
+        return [(int(round(x1 + i * (width + gap))), y, int(round(x1 + i * (width + gap) + width)) - 1, y + 9)
+                for i in range(self.count)]
+
+    BAR_LEFT = 196
+
+    def draw_position(self, d):
+        """ v7.4 (Ollen, 9 Nov 2026): the word being typed, readable at a glance """
+        x, cy = ui.PAD, self.LABEL_CY
+        f_label, f_num, f_of = ui.font(14, bold=True, mono=True), ui.font(28, bold=True), ui.font(18, bold=True)
+        ui.spaced(d, (x, cy + 1), "WORD", f_label, ui.DIM, 1, anchor="lm")
+        x += sum(ui.text_width(c, f_label) for c in "WORD") + 3 + 8
+        number = str(self.index + 1)
+        d.text((x, cy), number, fill=ui.ACCENT, font=f_num, anchor="lm")
+        x += ui.text_width(number, f_num) + 6
+        d.text((x, cy + 2), f"of {self.count}", fill=ui.TEXT, font=f_of, anchor="lm")
+        for i, rect in enumerate(self.bar_segments()):
+            color = ui.ACCENT if i < self.index else (ui.TEXT if i == self.index else ui.LINE)
+            d.rounded_rectangle(rect, radius=2, fill=color)
 
     def on_event(self, event):
         if event.kind != Event.TAP:
