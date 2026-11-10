@@ -10,14 +10,16 @@ this process's memory until "Done" or until the UPS HAT switch cuts the power; a
 descriptor scanned for "Check address" stays in RAM for the seed session too. Nothing is
 ever written to the microSD.
 """
+import base64
 import logging
+import random
 import time
 
-from nonceverify import address, crypto, seedqr, transport, ui, wordentry
+from nonceverify import address, crypto, seedqr, storage, transport, ui, wordentry
 from nonceverify.hw import HEIGHT, WIDTH, Event, QRDecoderError, decode_qr
 from nonceverify.psbt import PSBTError, combine_final_tx, has_signatures, parse_psbt, parse_tx
 from nonceverify.verify import (GRIND__EMBIT, GRIND__LIBSECP, GRIND__NONE, STATUS__FAIL, STATUS__FOREIGN,
-    STATUS__OK, STATUS__UNSIGNED, STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__OK, verify_psbt)
+    STATUS__OK, STATUS__UNSIGNED, STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__OK, VERDICT__PARTIAL, verify_psbt)
 
 # The signer under test, chosen by name on the "Seed ready" screen. Each one maps to the
 # low-R grinding rule its firmware follows (verify.py keeps the three rules); the rule is
@@ -54,7 +56,11 @@ def show_spaces(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "7.4"
+VERSION = "7.5"
+
+# v7.5: randomness for the checks that must not be predictable (txid ending options, the
+# xpub groups to find on the paper). The OS's CSPRNG; tests swap in a fixed one.
+RNG = random.SystemRandom()
 
 
 def btc(sats) -> str:
@@ -75,7 +81,7 @@ def txid_rows(txid: str) -> list:
 SPLASH_FEATURES = (
     ("RFC 6979 nonce", "signature nonces"),
     ("Sighash ALL", "no ANYONECANPAY / NONE"),
-    ("Txid match", "compare with Sparrow"),
+    ("Txid match", "broadcast what was checked"),
     ("Address check", "single-sig & multisig"),
 )
 
@@ -169,6 +175,7 @@ class SplashScreen(ui.Screen):
     PANEL = (40, 144, 440, 212)
     START = (140, 229, 340, 271)
     _background = None
+    sd_status = None                  # v7.5: storage.protect_microsd() result, set by main()
 
     def __init__(self):
         super().__init__()
@@ -196,6 +203,11 @@ class SplashScreen(ui.Screen):
         d.text((tx, cy + 1), "START", fill=ui.BACKGROUND, font=f, anchor="lm")
         ax = tx + text_w + 8
         d.polygon(((ax, cy - 7), (ax + 11, cy), (ax, cy + 7)), fill=ui.BACKGROUND)
+        if self.sd_status:
+            writable = self.sd_status == storage.STATUS__WRITABLE
+            text = "microSD WRITABLE: remount failed" if writable else f"microSD {self.sd_status}"
+            d.text((WIDTH / 2, 286), text, fill=ui.YELLOW if writable else ui.DIM,
+                   font=ui.font(13, bold=writable, mono=True), anchor="mm")
         return image
 
 
@@ -203,8 +215,8 @@ class HomeScreen(ui.Screen):
     step = 0
     STEPS = [
         ("qr", "Load the seed", "SeedQR or words, and passphrase: RAM only"),
-        ("search", "Scan the signed PSBT", "from Sparrow, before broadcasting · or check an address"),
-        ("shield", "Read the result", "green: broadcast · red: do not broadcast"),
+        ("search", "Scan the signed PSBT", "from Sparrow · or check an address"),
+        ("shield", "Read the result", "green: broadcast · red: do not"),
     ]
 
     def __init__(self):
@@ -249,7 +261,20 @@ class ConfirmPassphraseScreen(ui.Screen):
     def __init__(self, passphrase: str, fingerprint: str):
         super().__init__()
         self.passphrase, self.fingerprint = passphrase, fingerprint
-        self.buttons = ui.bottom_row(["Edit", "Confirm"], primary_index=1, values=["edit", "ok"])
+        self.revealed = False             # v7.5: hidden until "Show"
+        self.make_buttons()
+
+    def make_buttons(self):
+        self.buttons = ui.bottom_row(["Edit", "Hide" if self.revealed else "Show", "Confirm"], primary_index=2,
+                                     values=["edit", "reveal", "ok"])
+
+    def on_event(self, event):
+        value = super().on_event(event)
+        if value == "reveal":
+            self.revealed = not self.revealed
+            self.make_buttons()
+            return "__redraw__"
+        return value
 
     def draw(self, d, image):
         ui.title(d, "Check the passphrase")
@@ -258,13 +283,17 @@ class ConfirmPassphraseScreen(ui.Screen):
         d.text((WIDTH - ui.PAD - 12, ui.TOP + 44), f"{len(self.passphrase)} characters · spaces = ·",
                fill=ui.DIM, font=ui.font(12, mono=True), anchor="rt")
         f = ui.font(19, mono=True)
-        lines = ui.wrap(show_spaces(self.passphrase) if self.passphrase else "(empty)", f, WIDTH - 5 * ui.PAD)
+        shown = show_spaces(self.passphrase) if self.revealed else "•" * min(len(self.passphrase), 40)
+        lines = ui.wrap(shown if self.passphrase else "(empty)", f, WIDTH - 5 * ui.PAD)
         if len(lines) > 3:
             lines = lines[:2] + ["… " + lines[-1][-30:]]
         for i, line in enumerate(lines):
             d.text((ui.PAD + 14, ui.TOP + 62 + i * 19), line, fill=ui.TEXT, font=f)
         ui.label_value(d, ui.PAD + 14, ui.TOP + 128, "RESULTING XFP", self.fingerprint, ui.ACCENT, 32)
-        if self.passphrase != self.passphrase.strip():
+        if not self.revealed:
+            d.text((WIDTH - ui.PAD, ui.TOP + 160), "hidden: Show to check it", fill=ui.DIM, font=ui.font(14),
+                   anchor="rm")
+        elif self.passphrase != self.passphrase.strip():
             d.text((WIDTH - ui.PAD, ui.TOP + 160), "careful: spaces at the start or the end",
                    fill=ui.YELLOW, font=ui.font(14), anchor="rm")
 
@@ -290,20 +319,26 @@ class SeedReadyScreen(ui.Screen):
         self.make_buttons()
 
     def make_buttons(self):
-        label = signer_name(self.signer) if self.signer else "Tap to choose"
-        self.buttons = [ui.Button((ui.PAD, self.GRINDING_Y, WIDTH - ui.PAD, self.GRINDING_Y + 40),
-                                  label, value="toggle_signer", size=19)]
+        # v7.5: one button per device (a cycling toggle let a missed tap pick the wrong one)
+        self.buttons = []
+        width = (WIDTH - 4 * ui.PAD) / 3
+        for i, signer in enumerate(self.ORDER):
+            x1 = ui.PAD + i * (width + ui.PAD)
+            b = ui.Button((x1, self.GRINDING_Y, x1 + width, self.GRINDING_Y + 42), signer_name(signer),
+                          value=("signer", signer), size=18, primary=(signer == self.signer))
+            if self.locked and signer != self.signer:
+                b.color = ui.LINE
+            self.buttons.append(b)
         self.buttons += ui.bottom_row(["Change seed", "Address", "Scan PSBT"], primary_index=2,
                                       values=["change_seed", "address", "scan_psbt"], icons=[None, "search", "camera"])
 
     def on_event(self, event):
         value = super().on_event(event)
-        if value == "toggle_signer" and self.locked:
-            self.locked_hint = True
+        if isinstance(value, tuple) and value[0] == "signer" and self.locked:
+            self.locked_hint = value[1] != self.signer
             return "__redraw__"
-        if value == "toggle_signer":
-            self.signer = self.ORDER[(self.ORDER.index(self.signer) + 1) % len(self.ORDER)] if self.signer \
-                else self.ORDER[0]
+        if isinstance(value, tuple) and value[0] == "signer":
+            self.signer = value[1]
             self.must_choose = False
             self.make_buttons()
             return "__redraw__"
@@ -320,7 +355,7 @@ class SeedReadyScreen(ui.Screen):
         d.text((WIDTH - ui.PAD - 12, ui.TOP + 80), f"{self.words} words · " +
                ("with passphrase" if self.has_passphrase else "no passphrase"),
                fill=ui.DIM, font=ui.font(14), anchor="rm")
-        ui.paragraph(d, "It must match the wallet's XFP in Sparrow.", ui.TOP + 104, size=17, color=ui.TEXT)
+        ui.paragraph(d, "It must match the XFP on your wallet backup.", ui.TOP + 104, size=17, color=ui.TEXT)
         if self.locked_hint:
             d.text((ui.PAD, self.GRINDING_Y - 8), "Locked for this session: to change it, Change seed",
                    fill=ui.YELLOW, font=ui.font(13), anchor="ls")
@@ -331,11 +366,8 @@ class SeedReadyScreen(ui.Screen):
             d.text((ui.PAD, self.GRINDING_Y - 8), "First choose the device you signed with:",
                    fill=ui.YELLOW, font=ui.font(13), anchor="ls")
         else:
-            d.text((ui.PAD, self.GRINDING_Y - 8), "Who signed? (fixed once you press Scan PSBT)",
-                   fill=ui.DIM, font=ui.font(13), anchor="ls")
-        if self.signer:
-            d.text((WIDTH - ui.PAD, self.GRINDING_Y - 8), "grinding " + GRINDING_SHORT[signer_grinding(self.signer)],
-                   fill=ui.DIM, font=ui.font(13, mono=True), anchor="rs")
+            d.text((ui.PAD, self.GRINDING_Y - 8), "Which device signed? (fixed once you press Scan PSBT)",
+                   fill=ui.DIM, font=ui.font(14), anchor="ls")
 
 
 class ScanScreen:
@@ -346,8 +378,11 @@ class ScanScreen:
     PREVIEW = 320
     LEFT = (WIDTH - PREVIEW) // 2
 
-    def __init__(self, heading: str, handle_payload, errors=()):
+    def __init__(self, heading: str, handle_payload, errors=(), private: bool = False):
         self.heading = heading
+        # v7.5: a SeedQR is a seed: the preview is shown as a coarse mosaic, enough to aim
+        # the camera, useless to a phone filming the screen
+        self.private = private
         self.handle_payload = handle_payload       # payload -> (done: bool, progress: float, note)
         self.errors = (transport.TransportError, seedqr.SeedQRError) + tuple(errors)
         self.back = ui.Button((4, 200, self.LEFT - 4, 280), "", value="back", size=22, icon_name="back")
@@ -361,7 +396,10 @@ class ScanScreen:
         d.rectangle((0, 0, self.LEFT - 1, HEIGHT), fill=ui.PANEL)
         d.rectangle((self.LEFT + self.PREVIEW, 0, WIDTH, HEIGHT), fill=ui.PANEL)
         if frame is not None:
-            if frame.size != (self.PREVIEW, self.PREVIEW):
+            if self.private:
+                from PIL import Image
+                frame = frame.resize((10, 10)).resize((self.PREVIEW, self.PREVIEW), Image.NEAREST)
+            elif frame.size != (self.PREVIEW, self.PREVIEW):
                 frame = frame.resize((self.PREVIEW, self.PREVIEW))
             image.paste(frame, (self.LEFT, 0))
         # corner brackets of the viewfinder
@@ -425,6 +463,7 @@ class ScanScreen:
             started = time.monotonic()
             got_frame = False
             while True:
+                ui.housekeeping(hw)
                 if self._taps(hw) == "back":
                     return None
                 frame = hw.camera_frame()
@@ -490,6 +529,43 @@ class TxidCheckScreen(ui.Screen):
             d.text((WIDTH / 2, ui.TOP + 76 + i * 38), row, fill=ui.ACCENT if i % 2 == 0 else ui.TEXT, font=f, anchor="mm")
 
 
+class TxidEndingScreen(ui.Screen):
+    """
+    v7.5 (independent review): "Same txid" sits where every "go on" button sits and invites
+    a reflex tap. After it, the user picks how Sparrow's txid ENDS among three endings (two
+    random): the answer is on Sparrow's screen, not on this one.
+    """
+    step = 2
+    OPTIONS_Y = ui.TOP + 100
+
+    def __init__(self, txid: str, rng=None):
+        super().__init__()
+        rng = rng or RNG
+        self.correct = txid[-8:]
+        options = []
+        while len(options) < 2:
+            decoy = f"{rng.getrandbits(32):08x}"
+            if decoy != self.correct and decoy not in options and decoy[-4:] != self.correct[-4:]:
+                options.append(decoy)
+        options.insert(rng.randrange(3), self.correct)
+        self.options = options
+        self.buttons = ui.button_row([f"…{o[:4]} {o[4:]}" for o in options], self.OPTIONS_Y, height=64,
+                                     values=[("ending", o) for o in options])
+        self.buttons += ui.bottom_row(["None of these"], values=["different"])
+        self.buttons[-1].color = ui.RED
+
+    def on_event(self, event):
+        value = super().on_event(event)
+        if isinstance(value, tuple):
+            return "same" if value[1] == self.correct else "different"
+        return value
+
+    def draw(self, d, image):
+        ui.title(d, "How does Sparrow's txid END?")
+        ui.paragraph(d, "Look at Sparrow, not at this screen, and tap the same ending.", ui.TOP + 34, size=17,
+                     color=ui.DIM)
+
+
 class ResultScreen(ui.Screen):
     step = 2
     BANNER_H = 62
@@ -505,6 +581,34 @@ class ResultScreen(ui.Screen):
                   STATUS__UNVERIFIABLE: ui.YELLOW, STATUS__FOREIGN: ui.DIM}
         rule = GRINDING_SHORT.get(report.grinding, report.grinding)
         who = f"{signer_name(signer)} ({rule})" if signer in SIGNERS else f"grinding {rule}"
+        width = WIDTH - 3 * ui.PAD
+        if report.verdict == VERDICT__FAIL:
+            # v7.5: the reason first, not below the txid
+            for line in ui.wrap(report.tx_problem, ui.font(17), width) if report.tx_problem else []:
+                add(line, ui.RED, 17)
+            for r in report.inputs:
+                if r.status == STATUS__FAIL:
+                    for line in ui.wrap(f"input #{r.index}: {r.message}", ui.font(17), width):
+                        add(line, ui.RED, 17)
+        if report.verdict == VERDICT__PARTIAL and report.unchecked_cosigners:
+            for line in ui.wrap(f"Do not broadcast yet: {report.unchecked_cosigners} cosigner signature(s) not "
+                                "checked. Their nonce needs their seed: Change seed, load that seed, pick its "
+                                "device, scan this same PSBT.", ui.font(16), width):
+                add(line, ui.YELLOW, 16)
+        elif report.verdict == VERDICT__PARTIAL:
+            for line in ui.wrap("Not complete: some input is not signed yet. When the transaction is fully "
+                                "signed, scan it again here: only then broadcast, with the Tx QR.", ui.font(16),
+                                width):
+                add(line, ui.YELLOW, 16)
+        if report.extra_fields:
+            for line in ui.wrap(f"The PSBT carries {report.extra_fields} field(s) the check doesn't need: data "
+                                "that could leave with the PSBT file. Broadcast with the Tx QR, don't pass the PSBT "
+                                "on.", ui.font(15), width):
+                add(line, ui.YELLOW, 15)
+        if txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK:
+            for line in ui.wrap("Broadcast exactly the transaction checked here: Tx QR, then in Sparrow "
+                                "File > Load Transaction > From QR, and broadcast that.", ui.font(16), width):
+                add(line, ui.ACCENT, 16)
         add(f"XFP {report.fingerprint} · {who}", ui.DIM, 15, True)
         add("txid" + (" (same as Sparrow's)" if txid_confirmed else ""), ui.DIM, 15, True)
         for row in txid_rows(report.txid):
@@ -512,7 +616,7 @@ class ResultScreen(ui.Screen):
         # Every signature checked is SIGHASH_ALL (anything else is red): say so on green
         all_tag = " · sighash ALL" if report.verdict == VERDICT__OK else ""
         add(f"locktime {report.locktime} · version {report.version}{all_tag}", ui.DIM, 15, True)
-        if report.tx_problem:
+        if report.tx_problem and report.verdict != VERDICT__FAIL:
             for line in ui.wrap(report.tx_problem, ui.font(17), WIDTH - 3 * ui.PAD):
                 add(line, ui.RED, 17)
         if self.seed_mismatch():
@@ -533,8 +637,15 @@ class ResultScreen(ui.Screen):
                 add(f"     {chunk}", ui.DIM, 15, True)
         add(f"Fee: {btc(report.fee)}", ui.TEXT, 17)
         self.list = ui.ScrollList(lines, ui.HEADER_H + self.BANNER_H + 8, HEIGHT - ui.BUTTON_H - 2 * ui.PAD)
-        self.buttons = ui.bottom_row(["Done", "Next PSBT"], primary_index=1, values=["done", "again"],
-                                     icons=["power", "camera"])
+        # v7.5 review: only on green. On "this seed clean" the transaction would carry the
+        # unchecked cosigner signature, or is not complete
+        self.can_export = bool(txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK)
+        if self.can_export:
+            self.buttons = ui.bottom_row(["Finish", "Tx QR", "Next PSBT"], primary_index=1,
+                                         values=["done", "txqr", "again"], icons=["power", "qr", "camera"])
+        else:
+            self.buttons = ui.bottom_row(["Finish", "Next PSBT"], primary_index=1, values=["done", "again"],
+                                         icons=["power", "camera"])
 
     def seed_mismatch(self) -> bool:
         return not self.report.seed_matches and self.report.verdict == VERDICT__FAIL and \
@@ -546,9 +657,15 @@ class ResultScreen(ui.Screen):
             return ui.RED, "x_circle", "SEED DOES NOT MATCH", "check seed and passphrase"
         if self.report.verdict == VERDICT__OK and self.txid_confirmed:
             who = signer_name(self.signer) if self.signer in SIGNERS else None
-            return ui.GREEN, "ok_circle", "NONCE OK", (f"{who} signatures clean, txid OK: broadcast"
-                                                       if who else "no covert channel, txid OK: broadcast")
-        if self.report.verdict == VERDICT__OK:
+            what = "broadcast the Tx QR" if self.report.broadcast_tx else "broadcast"
+            return ui.GREEN, "ok_circle", "NONCE OK", (f"{who} signatures clean, txid OK: {what}"
+                                                       if who else f"no covert channel, txid OK: {what}")
+        if self.report.verdict == VERDICT__PARTIAL and self.txid_confirmed:
+            if self.report.unchecked_cosigners:
+                return ui.YELLOW, "warning", "THIS SEED: CLEAN", \
+                    f"do not broadcast yet: {self.report.unchecked_cosigners} cosigner signature(s) to check"
+            return ui.YELLOW, "warning", "THIS SEED: CLEAN", "not complete: scan again when fully signed"
+        if self.report.verdict in (VERDICT__OK, VERDICT__PARTIAL):
             # never shown by the app (the txid step comes first), kept for safety
             return ui.YELLOW, "warning", "COMPARE THE TXID", "nonces OK: compare the txid before broadcasting"
         if self.report.verdict == VERDICT__FAIL:
@@ -651,11 +768,6 @@ class DescriptorScreen(ui.Screen):
             for p in check.problems:
                 for line in ui.wrap(p, ui.font(16), WIDTH - 3 * ui.PAD):
                     add(line, ui.RED, 16)
-        if desc.source == "text":
-            add(f"checksum #{desc.checksum}" if desc.checksum else "no checksum in the QR: compare every key",
-                ui.TEXT if desc.checksum else ui.YELLOW, 16, True)
-        else:
-            add("UR crypto-output (no checksum): compare every key", ui.YELLOW, 15)
         for i, key in enumerate(desc.keys):
             ours = i in check.ours
             fp = key.origin_fingerprint.hex() if key.origin_fingerprint else "--------"
@@ -664,14 +776,22 @@ class DescriptorScreen(ui.Screen):
             add(f"#{i + 1} {fp}  {path}" + ("   ← THIS SEED" if ours else ""), ui.GREEN if ours else ui.TEXT, 16, True)
             # the whole xpub and what follows it: everything that decides the addresses
             for chunk in ui.wrap(address.grouped(key.xpub_text), ui.font(15, mono=True), WIDTH - 5 * ui.PAD):
-                add(f"   {chunk}", ui.DIM, 15, True)
-            add(f"   then {key.suffix()}", ui.DIM, 15, True)
-        add("compare every key, all of it, with the backup", ui.YELLOW, 14)
+                add(f"   {chunk}", ui.TEXT, 15, True)
+            add(f"   then {key.suffix()}", ui.TEXT, 15, True)
+        # v7.5 (independent review): start and end of an xpub can be forged with look-alike
+        # keys, and the BIP380 checksum too: it detects damage, not tampering
+        if desc.source == "text" and desc.checksum:
+            add(f"checksum #{desc.checksum}: detects damage, not tampering", ui.DIM, 14, True)
+        others = sum(1 for i in range(len(desc.keys)) if i not in check.ours)
+        if others and not check.problems:
+            for line in ui.wrap(f"Next: for each of the {others} other key(s) you find on the paper two groups "
+                                "picked at random here.", ui.font(15), WIDTH - 3 * ui.PAD):
+                add(line, ui.YELLOW, 15)
         self.list = ui.ScrollList(lines, ui.TOP + 34, HEIGHT - ui.BUTTON_H - 2 * ui.PAD)
         if check.problems:
             self.buttons = ui.bottom_row(["Back"], values=["back"], icons=["back"])
         else:
-            self.buttons = ui.bottom_row(["Back", "Same as backup"], primary_index=1, values=["back", "ok"])
+            self.buttons = ui.bottom_row(["Back", "Check keys"], primary_index=1, values=["back", "ok"])
 
     def draw(self, d, image):
         color = ui.RED if self.check.problems else ui.TEXT
@@ -686,7 +806,120 @@ class DescriptorScreen(ui.Screen):
         if event.kind == Event.SWIPE_DOWN:
             self.list.scroll(-44)
             return "__redraw__"
+        if event.kind == Event.TAP and self.list.top <= event.y < self.list.bottom:
+            # v7.5: tap paging as on the result (swipes are unreliable on the resistive panel)
+            middle = (self.list.top + self.list.bottom) / 2
+            self.list.scroll(-110 if event.y < middle else 110)
+            return "__redraw__"
         return super().on_event(event)
+
+
+KEY_CHECK_GROUPS = 3
+
+
+def key_dependent_start(xpub_text: str) -> int:
+    """
+    v7.5 review: the first character of the xpub that depends on its PUBLIC KEY. Base58
+    writes the 78 bytes as one number: the leading ~60 characters are fixed by version,
+    depth, parent fingerprint, child number and chain code, all public, so a look-alike
+    key with the real chain code matches them for free. Found by changing the key and
+    seeing where the text changes (a few variants: the earliest difference wins).
+    """
+    from nonceverify.psbt import base58check
+    raw = address.b58decode_check(xpub_text)
+    first = len(xpub_text)
+    for n in range(1, 9):
+        other = crypto.pubkey_compressed(crypto.point_mul_g(n * 0x1000003 + 7))
+        text = base58check(raw[:45] + other)
+        first = min(first, next((i for i, (a, b) in enumerate(zip(text, xpub_text)) if a != b), first))
+    return first
+
+
+def pick_groups(xpub_text: str, rng=None, count: int = KEY_CHECK_GROUPS) -> list:
+    """
+    Group indexes (groups of four) to find on the paper, chosen by the device at random
+    among the groups that depend on the public key, the last (short) group excluded.
+    Matching one unpredictable group costs a forger ~58^4 = 2^23 tries per key and
+    group; matching enough of them to pass three random picks is out of reach.
+    """
+    rng = rng or RNG
+    groups = address.grouped(xpub_text).split(" ")
+    lo = (key_dependent_start(xpub_text) + 3) // 4            # first whole group after the change
+    hi = len(groups) - 1 if len(groups[-1]) < 4 else len(groups)
+    pool = list(range(lo, hi))
+    picked = []
+    for _ in range(min(count, len(pool))):
+        picked.append(pool.pop(rng.randrange(len(pool))))
+    return sorted(picked)
+
+
+class KeyCheckScreen(ui.Screen):
+    """
+    v7.5 (independent review): a cosigner key of the descriptor scanned, with two groups of
+    its xpub picked at random and highlighted. The user finds them on the paper backup.
+    A forged look-alike key can match start, end and even the checksum, but not groups
+    the attacker could not predict. The groups come from the part of the xpub that
+    depends on the public key (pick_groups): the leading part is chain code and public
+    metadata and can be copied into a look-alike key.
+    """
+    header_label = "DESCRIPTOR"
+    COLS = 7
+
+    def __init__(self, desc, index: int, rng=None):
+        super().__init__()
+        self.desc, self.index = desc, index
+        self.key = desc.keys[index]
+        self.groups = address.grouped(self.key.xpub_text).split(" ")
+        self.picked = pick_groups(self.key.xpub_text, rng)
+        self.buttons = ui.bottom_row(["Different", "Same on paper"], primary_index=1, values=["different", "same"])
+        self.buttons[0].color = ui.RED
+
+    def draw(self, d, image):
+        fp = self.key.origin_fingerprint.hex() if self.key.origin_fingerprint else "--------"
+        path = crypto.format_path(self.key.origin_path) if self.key.origin_path else "(no origin)"
+        d.text((ui.PAD, ui.TOP + 12), f"Key #{self.index + 1} of {len(self.desc.keys)}  {fp}  {path}",
+               fill=ui.TEXT, font=ui.fit_font(f"Key #{self.index + 1} of {len(self.desc.keys)}  {fp}  {path}", 17,
+                                              WIDTH - 2 * ui.PAD, bold=True), anchor="lm")
+        f = ui.font(16, mono=True)
+        cell = ui.text_width("WWWW ", f) + 2
+        y = ui.TOP + 30
+        for n, group in enumerate(self.groups):
+            col, row = n % self.COLS, n // self.COLS
+            x = ui.PAD + 4 + col * cell
+            gy = y + row * 22
+            if n in self.picked:
+                d.rounded_rectangle((x - 3, gy - 2, x + ui.text_width(group, f) + 3, gy + 19), radius=3,
+                                    fill=ui.ACCENT)
+            d.text((x, gy), group, fill=ui.BACKGROUND if n in self.picked else ui.DIM, font=f)
+        y += ((len(self.groups) + self.COLS - 1) // self.COLS) * 22 + 6
+        for n in self.picked:
+            start = n * 4 + 1
+            d.text((ui.PAD, y), f"characters {start}-{start + len(self.groups[n]) - 1}:", fill=ui.TEXT,
+                   font=ui.font(16), anchor="lt")
+            d.text((ui.PAD + 190, y - 3), self.groups[n], fill=ui.ACCENT, font=ui.font(22, bold=True, mono=True),
+                   anchor="lt")
+            y += 24
+        d.text((ui.PAD, y + 2), "Find them in this key's xpub on your paper backup.", fill=ui.YELLOW,
+               font=ui.font(15), anchor="lt")
+
+
+class ThresholdScreen(ui.Screen):
+    """ v7.5: M-of-N confirmed against the paper (an extra key + threshold 1 changed only the title) """
+    header_label = "DESCRIPTOR"
+
+    def __init__(self, desc):
+        super().__init__()
+        self.desc = desc
+        m, n = desc.threshold, len(desc.keys)
+        self.buttons = ui.bottom_row(["No", f"Yes, {m} of {n}"], primary_index=1, values=["no", "yes"])
+        self.buttons[0].color = ui.RED
+
+    def draw(self, d, image):
+        ui.title(d, "Does your paper backup say")
+        d.text((WIDTH / 2, ui.TOP + 96), f"{self.desc.threshold} of {len(self.desc.keys)}", fill=ui.ACCENT,
+               font=ui.font(54, bold=True), anchor="mm")
+        d.text((WIDTH / 2, ui.TOP + 150), self.desc.describe(), fill=ui.TEXT, font=ui.font(18), anchor="mm")
+        ui.paragraph(d, "signatures needed, out of the keys written on it?", ui.TOP + 172, size=16, color=ui.DIM)
 
 
 class AddressResultScreen(ui.Screen):
@@ -698,9 +931,17 @@ class AddressResultScreen(ui.Screen):
         self.addr, self.match, self.error = addr, match, error
         lines = []
         add = lambda text, color=ui.TEXT, size=17, mono=False: lines.append((text, color, size, mono))
+        self.unusual = False
         if addr is not None:
             for chunk in ui.wrap(address.grouped(addr.text), ui.font(22, bold=True, mono=True), WIDTH - 3 * ui.PAD):
                 add(chunk, ui.TEXT, 22, True)
+            if addr.extras:
+                # v7.5: lightning=, pj=, req-...: another payment instruction on the same QR
+                for line in ui.wrap("The QR also carries: " + ", ".join(addr.extras) + ". A payer's wallet could "
+                                    "follow that instead of paying this address.", ui.font(16), WIDTH - 3 * ui.PAD):
+                    add(line, ui.RED, 16)
+            if addr.amount is not None:
+                add(f"amount in the QR: {addr.amount[:20]} BTC", ui.TEXT, 17)
         if error:
             for line in ui.wrap(error, ui.font(17), WIDTH - 3 * ui.PAD):
                 add(line, ui.RED, 17)
@@ -714,6 +955,10 @@ class AddressResultScreen(ui.Screen):
                                     + ": make sure your wallet in Sparrow uses this type and account",
                                     ui.font(15), WIDTH - 3 * ui.PAD):
                     add(line, ui.YELLOW, 15)
+                self.unusual = bool(match.account) or addr.network != "main"
+            for line in ui.wrap("Compare it, all of it, with the address you will give out.", ui.font(16),
+                                WIDTH - 3 * ui.PAD):
+                add(line, ui.TEXT, 16)
         for text, size in ((wallet, 15), (searched, 14)):
             for line in ui.wrap(text, ui.font(size), WIDTH - 3 * ui.PAD) if text else []:
                 add(line, ui.DIM, size)
@@ -724,8 +969,13 @@ class AddressResultScreen(ui.Screen):
     def banner(self):
         if self.error:
             return ui.RED, "x_circle", "NOT CHECKED", "this address can't be checked here"
+        if self.addr is not None and self.addr.extras:
+            return ui.RED, "x_circle", "DO NOT SHARE THIS QR", "it carries other payment instructions"
+        if self.match is not None and self.unusual:
+            return ui.YELLOW, "warning", "YOUR ADDRESS · CHECK", "unusual account or network: see below"
         if self.match is not None:
-            return ui.GREEN, "ok_circle", "YOUR ADDRESS", "derived from the seed loaded"
+            return ui.GREEN, "ok_circle", "YOUR ADDRESS", ("derived from the seed loaded" if self.match.account is not None
+                                                           else "in the descriptor you confirmed")
         return ui.RED, "x_circle", "NOT YOUR ADDRESS", "not found: do not use it to receive"
 
     def draw(self, d, image):
@@ -752,7 +1002,7 @@ class AddressResultScreen(ui.Screen):
 # ---------------------------------------------------------------------------------------
 # v7.3: address explorer
 # ---------------------------------------------------------------------------------------
-EXPLORER_PAGE = 6
+EXPLORER_PAGE = 4                     # v7.5: 40-pixel rows (were 6 of 26)
 EXPLORER_MAX_INDEX = 0x7FFFFFFF - EXPLORER_PAGE
 EXPLORER_MAX_ACCOUNT = 99
 
@@ -771,19 +1021,18 @@ def short_address(text: str, f, width: int) -> str:
     return " ".join(groups[:4]) + " … " + " ".join(groups[-2:])
 
 
-def address_qr(text: str, size: int):
+def checked_qr(data: str, size: int):
     """
-    A QR code of `text` at most `size` pixels wide, or None. Made with the `qrcode`
+    A QR code of `data` at most `size` pixels wide, or None. Made with the `qrcode`
     package that SeedSigner OS ships (public data only), then read back with the same
-    zbar decoder as the camera: if what it reads isn't exactly the address shown, no QR
-    is shown at all.
+    zbar decoder as the camera: if what it reads isn't EXACTLY `data` (v7.5: case
+    included; base58 is case-sensitive), no QR is shown at all.
     """
     try:
         import qrcode
         from PIL import Image
-        upper = text.upper() if text.lower().startswith(("bc1", "tb1", "bcrt1")) else text
         q = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=2, box_size=1)
-        q.add_data(upper)
+        q.add_data(data)
         q.make(fit=True)
         modules = q.make_image(fill_color="black", back_color="white").convert("RGB")
         scale = max(1, size // modules.size[0])
@@ -792,12 +1041,97 @@ def address_qr(text: str, size: int):
     except QRDecoderError:
         raise
     except Exception as e:
-        logger.info(f"address QR not available: {type(e).__name__}")
+        logger.info(f"QR not available: {type(e).__name__}")
         return None
-    if payload is None or payload.decode("ascii", "replace").lower() != text.lower():
-        logger.info("address QR self-check failed")
+    if payload is None or payload.decode("ascii", "replace") != data:
+        logger.info("QR self-check failed")
         return None
     return image
+
+
+def address_qr(text: str, size: int):
+    """ The address as a QR (bech32 uppercase: a smaller QR, and BIP173 allows it) """
+    bech32 = text.lower().startswith(("bc1", "tb1", "bcrt1"))
+    return checked_qr(text.upper() if bech32 else text, size)
+
+
+# v7.5: the verified transaction as BBQr (Coinkite), file type "T", base32: Sparrow reads
+# it with File > Load Transaction > From QR (and Coldcard Q too). Parts sized for QR
+# version 8 (M): 4-pixel modules in the 230-pixel box, easy for a webcam.
+BBQR_PART_CHARS = 192
+
+
+def bbqr_parts(raw: bytes, file_type: str = "T") -> list:
+    data = base64.b32encode(raw).decode("ascii").rstrip("=")
+    chunks = [data[i:i + BBQR_PART_CHARS] for i in range(0, len(data), BBQR_PART_CHARS)] or [""]
+    if len(chunks) > 36 * 36 - 1:
+        raise ValueError("transaction too large for BBQr")
+
+    def b36(n):
+        digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return digits[n // 36] + digits[n % 36]
+    return [f"B$2{file_type}{b36(len(chunks))}{b36(i)}{c}" for i, c in enumerate(chunks)]
+
+
+class BroadcastScreen(ui.Screen):
+    """
+    v7.5: the transaction verified here, as an animated QR, to be loaded into Sparrow and
+    broadcast. A segwit txid does not cover the signatures: only these bytes are the
+    ones checked (independent review, 10 Nov 2026).
+    """
+    step = 2
+    QR_BOX = 228
+    FRAME_S = 0.6
+
+    def __init__(self, report):
+        super().__init__()
+        self.report = report
+        self.parts = bbqr_parts(report.broadcast_tx)
+        self.frames = [checked_qr(p, self.QR_BOX) for p in self.parts]
+        self.ok = all(f is not None for f in self.frames)
+        self.index = 0
+        self.buttons = ui.bottom_row(["Back"], values=["back"], icons=["back"])
+
+    def draw(self, d, image):
+        x = ui.PAD
+        if self.ok:
+            frame = self.frames[self.index]
+            d.rectangle((x, ui.TOP, x + self.QR_BOX, ui.TOP + self.QR_BOX), fill=(255, 255, 255))
+            image.paste(frame, (x + (self.QR_BOX - frame.size[0]) // 2, ui.TOP + (self.QR_BOX - frame.size[1]) // 2))
+        else:
+            d.text((x, ui.TOP + 20), "QR not available", fill=ui.RED, font=ui.font(18, bold=True))
+        x += self.QR_BOX + 12
+        width = WIDTH - ui.PAD - x
+        d.text((x, ui.TOP + 12), "Broadcast THIS", fill=ui.GREEN, font=ui.font(19, bold=True), anchor="lm")
+        y = ui.TOP + 30
+        for line in ui.wrap("Sparrow: File > Load Transaction > From QR, then Broadcast. The txid must "
+                            "be the same as before.", ui.font(14), width):
+            d.text((x, y), line, fill=ui.TEXT, font=ui.font(14))
+            y += 18
+        y += 6
+        d.text((x, y), "txid ends", fill=ui.DIM, font=ui.font(13))
+        d.text((x, y + 16), "…" + self.report.txid[-8:-4] + " " + self.report.txid[-4:], fill=ui.ACCENT,
+               font=ui.font(18, bold=True, mono=True))
+        d.text((x, ui.TOP + self.QR_BOX - 6), f"QR {self.index + 1} / {len(self.parts)} · BBQr",
+               fill=ui.DIM, font=ui.font(13, mono=True), anchor="ls")
+
+    def run(self, hw, timeout: float = None):
+        hw.show(self.render())
+        shown = time.monotonic()
+        tick = getattr(hw, "battery_tick", None)
+        while True:
+            ui.housekeeping(hw)
+            if tick is not None and tick():
+                hw.show(self.render())
+            for event in hw.poll():
+                result = self.on_event(event)
+                if result is not None and result != "__redraw__":
+                    return result
+            if len(self.frames) > 1 and time.monotonic() - shown >= self.FRAME_S:
+                self.index = (self.index + 1) % len(self.frames)
+                hw.show(self.render())
+                shown = time.monotonic()
+            hw.wait()
 
 
 class ExplorerWalletScreen(ui.Screen):
@@ -822,7 +1156,7 @@ class ExplorerWalletScreen(ui.Screen):
 class ExplorerListScreen(ui.Screen):
     header_label = "EXPLORER"
     ROW_TOP = ui.TOP + 66
-    ROW_H = 26
+    ROW_H = 40
 
     def __init__(self, explorer, change: bool, start: int, singlesig: bool):
         super().__init__()
@@ -830,8 +1164,9 @@ class ExplorerListScreen(ui.Screen):
         self.rows = [explorer.address(change, start + i) for i in range(EXPLORER_PAGE)] \
             if indexed(explorer) else [explorer.address(change, 0)]
         top = ui.TOP + 2
-        self.buttons = [ui.Button((ui.PAD, top, 150, top + 38), "Change" if change else "Receive",
-                                  value="toggle", size=17, primary=change)]
+        # v7.5: two segments instead of a toggle that turned teal (like an action button)
+        self.buttons = [ui.Button((ui.PAD, top, 78, top + 38), "Recv", value="receive", size=17, primary=not change),
+                        ui.Button((82, top, 150, top + 38), "Chg", value="change", size=17, primary=change)]
         if singlesig:
             self.buttons += [ui.Button((160, top, 204, top + 38), "−", value="acct-", size=22),
                              ui.Button((290, top, 334, top + 38), "+", value="acct+", size=22)]
@@ -847,14 +1182,17 @@ class ExplorerListScreen(ui.Screen):
                    font=ui.font(16, bold=True, mono=True), anchor="mm")
         d.text((ui.PAD, ui.TOP + 54), self.explorer.label, fill=ui.DIM, font=ui.font(14), anchor="lm")
         f = ui.font(16, mono=True)
+        f_index = ui.font(15, bold=True, mono=True)
+        col = max(50, max((ui.text_width(f"#{steps[-1]}", f_index) + 6 for _t, steps in self.rows), default=50)) \
+            if indexed(self.explorer) else 50
         for i, (text, steps) in enumerate(self.rows):
             y = self.ROW_TOP + i * self.ROW_H
-            if i % 2 == 0:
-                d.rectangle((ui.PAD, y, WIDTH - ui.PAD, y + self.ROW_H - 2), fill=ui.PANEL)
+            d.rounded_rectangle((ui.PAD, y + 1, WIDTH - ui.PAD, y + self.ROW_H - 3), radius=4,
+                                fill=ui.PANEL, outline=ui.LINE)
             index = steps[-1] if indexed(self.explorer) else None
-            d.text((ui.PAD + 50, y + self.ROW_H / 2 - 1), f"#{index}" if index is not None else "", fill=ui.ACCENT,
-                   font=ui.font(15, bold=True, mono=True), anchor="rm")
-            d.text((ui.PAD + 58, y + self.ROW_H / 2 - 1), short_address(text, f, WIDTH - 2 * ui.PAD - 62),
+            d.text((ui.PAD + col, y + self.ROW_H / 2 - 1), f"#{index}" if index is not None else "", fill=ui.ACCENT,
+                   font=f_index, anchor="rm")
+            d.text((ui.PAD + col + 8, y + self.ROW_H / 2 - 1), short_address(text, f, WIDTH - 2 * ui.PAD - col - 12),
                    fill=ui.TEXT, font=f, anchor="lm")
 
     def on_event(self, event):
@@ -920,8 +1258,8 @@ def explorer_flow(hw, session):
             value = ExplorerListScreen(explorer, change, start, singlesig).run(hw)
             if value == "back":
                 break
-            if value == "toggle" and explorer.has_change():
-                change = not change
+            if value in ("receive", "change") and (value == "receive" or explorer.has_change()):
+                change = value == "change"
             elif value in ("acct-", "acct+") and singlesig:
                 account = min(EXPLORER_MAX_ACCOUNT, max(0, explorer.account + (1 if value == "acct+" else -1)))
                 if account != explorer.account:
@@ -931,9 +1269,9 @@ def explorer_flow(hw, session):
             elif value == "next":
                 start = min(EXPLORER_MAX_INDEX, start + EXPLORER_PAGE)
             elif value == "goto":
-                typed = ui.KeyboardScreen("").run(hw)[1].strip()
-                if typed.isdigit() and len(typed) <= 10:
-                    start = min(EXPLORER_MAX_INDEX, int(typed))
+                result = ui.NumberPadScreen("Go to address #").run(hw)       # v7.5: digits only
+                if result[0] == "done" and result[1].isdigit() and len(result[1]) <= 10:
+                    start = min(EXPLORER_MAX_INDEX, int(result[1]))
             elif isinstance(value, tuple) and value[0] == "row":
                 text, steps = explorer.address(change, start + value[1] if indexed(explorer) else 0)
                 where = ("change" if change else "receive") + (f" #{steps[-1]}" if indexed(explorer) else "")
@@ -961,11 +1299,26 @@ def load_descriptor(hw, session) -> bool:
         collector.add(payload)
         return collector.complete, collector.progress, "QR of another descriptor: starting over" if collector.restarted else ""
 
-    if ScanScreen("Wallet descriptor (backup)", on_payload, errors=(address.DescriptorError,)).run(hw) is None:
+    if ScanScreen("Descriptor from backup", on_payload, errors=(address.DescriptorError,)).run(hw) is None:
         return False
     desc = collector.result
     check = address.check_seed_in_descriptor(desc, session.master)
     if DescriptorScreen(desc, check).run(hw) != "ok" or check.problems:
+        return False
+    # v7.5 (independent review): random groups of every other key found on the paper,
+    # then the threshold. Start, end and checksum alone can be forged.
+    for i in range(len(desc.keys)):
+        if i in check.ours:
+            continue
+        if KeyCheckScreen(desc, i).run(hw) != "same":
+            ui.MessageScreen("Not your backup", f"Key #{i + 1} of the QR is not the one on your paper: the "
+                             "descriptor QR was altered or belongs to another wallet. Don't use it.",
+                             heading_color=ui.RED, icon_name="x_circle").run(hw)
+            return False
+    if desc.is_multisig and ThresholdScreen(desc).run(hw) != "yes":
+        ui.MessageScreen("Not your backup", "The number of signatures needed is not the one on your paper: "
+                         "the descriptor QR was altered. Don't use it.", heading_color=ui.RED,
+                         icon_name="x_circle").run(hw)
         return False
     session.descriptor = desc
     return True
@@ -1022,6 +1375,12 @@ class Session:
         self.signer_locked = False       # True once "Scan PSBT" was pressed in this seed session
         self.failed = {}                 # txid -> signer it was red under; kept until power-off (v7)
         self.descriptor = None           # v7: wallet descriptor for "Check address" (public data)
+        # v7.5: (pubkey, signature) pairs whose nonce a seed of this power-on verified,
+        # green and txid confirmed. Public data, kept across "Change seed": a multisig's
+        # cosigner signatures become checked when their own seed is loaded and the same
+        # PSBT scanned again.
+        self.clean_sigs = set()
+        self.coldcard_intro_shown = False
 
     def wipe(self):
         if self.master is not None:
@@ -1063,7 +1422,7 @@ def load_seed(hw, session: Session, method: str = "scan_seed") -> bool:
             found["mnemonic"] = seedqr.decode(payload)
             return True, 1.0, ""
 
-        if ScanScreen("SeedQR", on_payload).run(hw) is None:
+        if ScanScreen("SeedQR", on_payload, private=True).run(hw) is None:
             return False
         mnemonic = found.pop("mnemonic")
     words = len(mnemonic.split())
@@ -1089,7 +1448,15 @@ def check_psbt(hw, session: Session) -> str:
         note = "QR of another PSBT: starting over" if collector.restarted else ""
         return collector.complete, collector.progress, note
 
-    heading = f"Signed PSBT · {signer_name(session.signer)}"
+    coldcard = session.signer == SIGNER__COLDCARD_Q
+    if coldcard and not session.coldcard_intro_shown:
+        session.coldcard_intro_shown = True
+        ui.MessageScreen("Coldcard Q: two QR codes", "Both from Sparrow, in any order:\n"
+                         "1. the signed transaction: load the Q's .txn in Sparrow, then show it as QR;\n"
+                         "2. the UNSIGNED PSBT of the same transaction.\n"
+                         "At the end, broadcast the Tx QR shown here.",
+                         buttons=("Scan",), heading_color=ui.ACCENT, icon_name="camera").run(hw)
+    heading = f"PSBT · {signer_name(session.signer)}"
     if ScanScreen(heading, on_payload).run(hw) is None:
         return "back"
     try:
@@ -1097,50 +1464,62 @@ def check_psbt(hw, session: Session) -> str:
         if transport.looks_like_final_tx(first):
             # v7.2: a final transaction (Coldcard Q): its unsigned PSBT gives the amounts
             parse_tx(first)
-            ui.MessageScreen("Final transaction read",
-                             "The signer returned the final transaction (Coldcard Q does). Now scan the "
-                             "UNSIGNED PSBT of the same transaction from Sparrow: it carries the amounts "
-                             "and paths needed to check the signatures.",
+            ui.MessageScreen("1 of 2: final transaction read",
+                             "Now the UNSIGNED PSBT of the same transaction, from Sparrow: it carries the "
+                             "amounts and paths needed to check the signatures.",
                              buttons=("Scan unsigned PSBT",), heading_color=ui.ACCENT, icon_name="camera").run(hw)
-            unsigned = scan_second(hw, "Unsigned PSBT", final=False)
+            unsigned = scan_second(hw, "2 of 2: unsigned PSBT", final=False)
             if unsigned is None:
                 return "back"
             psbt = combine_final_tx(parse_psbt(unsigned), first)
         else:
             psbt = parse_psbt(first)
             if not has_signatures(psbt):
-                ui.MessageScreen("Unsigned PSBT read",
-                                 "This PSBT has no signatures. If the signer returned the final transaction "
-                                 "(Coldcard Q), scan it now from Sparrow.",
+                if not coldcard:
+                    ui.MessageScreen("PSBT without signatures", "This is the unsigned PSBT. Scan the SIGNED one "
+                                     "from Sparrow (after loading what the signer returned).",
+                                     heading_color=ui.YELLOW, icon_name="warning").run(hw)
+                    return "again"
+                ui.MessageScreen("1 of 2: unsigned PSBT read",
+                                 "Now the signed transaction, from Sparrow (the Q's .txn loaded there).",
                                  buttons=("Scan final transaction",), heading_color=ui.ACCENT,
                                  icon_name="camera").run(hw)
-                final = scan_second(hw, "Final transaction", final=True)
+                final = scan_second(hw, "2 of 2: final transaction", final=True)
                 if final is None:
                     return "back"
                 psbt = combine_final_tx(psbt, final)
         working = WorkingScreen(hw)
         report = verify_psbt(psbt, session.master, progress=working, scan_progress=working.scan,
-                             grinding=signer_grinding(session.signer))
+                             grinding=signer_grinding(session.signer), clean_elsewhere=session.clean_sigs)
     except (PSBTError, ValueError) as e:
-        ui.MessageScreen("PSBT not readable", str(e)[:200], heading_color=ui.RED, icon_name="x_circle").run(hw)
+        ui.MessageScreen("PSBT not readable", str(e)[:160] + ". Scan it again from Sparrow; if it keeps "
+                         "failing, export the PSBT again.", heading_color=ui.RED, icon_name="x_circle").run(hw)
         return "again"
     except Exception as e:
         logger.exception("verification error")
-        ui.MessageScreen("Verification error", f"{type(e).__name__}. The seed stays loaded.",
-                         heading_color=ui.RED, icon_name="warning").run(hw)
+        ui.MessageScreen("Verification error", f"{type(e).__name__}: not checked, so not green. The seed "
+                         "stays loaded: try the scan again.", heading_color=ui.RED, icon_name="warning").run(hw)
         return "again"
     lock_after_red(session, report)
     confirmed = False
-    if report.verdict == VERDICT__OK:
-        # v7: no green before the txid has been compared with Sparrow's
-        if TxidCheckScreen(report).run(hw) == "same":
+    if report.verdict in (VERDICT__OK, VERDICT__PARTIAL):
+        # v7: no green before the txid has been compared with Sparrow's; v7.5: then the
+        # ending picked among three, from Sparrow's screen
+        if TxidCheckScreen(report).run(hw) == "same" and TxidEndingScreen(report.txid).run(hw) == "same":
             confirmed = True
+            for r in report.inputs:
+                session.clean_sigs.update(r.checked_sigs)
         else:
             report.verdict = VERDICT__FAIL
             report.tx_problem = ("The txid is NOT the one in Sparrow: the transaction checked here is not "
                                  "the one Sparrow would broadcast. Do not broadcast.")
-            lock_after_red(session, report)
-    return ResultScreen(report, session.signer, txid_confirmed=confirmed).run(hw)
+            # v7.5 review: a txid mismatch (or a mis-tap on the ending) says nothing about the
+            # signer: it is not recorded as red for the other seeds and devices of a multisig
+    while True:
+        choice = ResultScreen(report, session.signer, txid_confirmed=confirmed).run(hw)
+        if choice != "txqr":
+            return choice
+        BroadcastScreen(report).run(hw)
 
 
 def scan_second(hw, heading: str, final: bool):
@@ -1202,7 +1581,8 @@ def run(hw, session: Session = None, splash: bool = True):
         if not session.signer_locked:
             session.signer = ready.signer
         if choice == "change_seed":
-            session.wipe()
+            if confirm_wipe(hw):
+                session.wipe()
             continue
         if choice == "address":
             address_flow(hw, session)
@@ -1219,6 +1599,8 @@ def run(hw, session: Session = None, splash: bool = True):
             outcome = check_psbt(hw, session)
             if outcome == "again":
                 continue
+            if outcome == "done" and not confirm_wipe(hw):
+                outcome = "keep"             # v7.5: "Finish" asks first; "Keep" goes back to the seed
             break
         if outcome == "done":
             session.wipe()
@@ -1226,6 +1608,15 @@ def run(hw, session: Session = None, splash: bool = True):
                              "Seed and passphrase have been removed from the app's memory.\n\n"
                              "Switch off with the UPS HAT switch: that clears the RAM completely.",
                              buttons=("Start again",), heading_color=ui.ACCENT, icon_name="lock").run(hw)
+
+
+def confirm_wipe(hw) -> bool:
+    """ v7.5: wiping the seed means typing it all again: ask, the destructive choice on the left """
+    choice = ui.MessageScreen("Wipe the seed?", "Seed and passphrase are removed from memory: to check "
+                              "anything else you will load them again.", buttons=("Wipe", "Keep"),
+                              primary_index=1, values=["wipe", "keep"], heading_color=ui.YELLOW,
+                              icon_name="lock").run(hw)
+    return choice == "wipe"
 
 
 def boot_error(hw, text: str):
@@ -1243,6 +1634,13 @@ def boot_error(hw, text: str):
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    # v7.5: before anything else, the microSD read-only (storage.py)
+    SplashScreen.sd_status = storage.protect_microsd()
+    logger.info(f"microSD: {SplashScreen.sd_status}")
+    # v7.5 review: SeedSigner OS may mount the card after this point (mdev coldplug runs
+    # after start.sh), or again after a re-insertion: checked again every second
+    guard = storage.MicroSDGuard(on_change=lambda status: setattr(SplashScreen, "sd_status", status))
+    ui.housekeeping_hooks.append(guard.tick)
     from nonceverify.hw import Hardware, ImportGuard, loaded_blocked_modules
 
     # Drivers first, then the guard: if a driver pulled in the signer's crypto, the screen

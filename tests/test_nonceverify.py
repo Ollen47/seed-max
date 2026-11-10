@@ -20,7 +20,7 @@ import pytest
 from nonceverify import crypto, seedqr, transport
 from nonceverify.psbt import PSBTError, address, parse_psbt
 from nonceverify.verify import (STATUS__FAIL, STATUS__FOREIGN, STATUS__OK, STATUS__UNSIGNED,
-    STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__INCOMPLETE, VERDICT__OK, verify_psbt)
+    STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__INCOMPLETE, VERDICT__OK, verify_psbt, VERDICT__PARTIAL)
 
 embit = pytest.importorskip("embit")
 coincurve = pytest.importorskip("coincurve")
@@ -358,13 +358,15 @@ def test_multisig_p2wsh_checks_only_our_key():
     psbt.sign_with(roots[0])
     psbt.sign_with(roots[1])
     report = run_verify(psbt)
-    assert report.verdict == VERDICT__OK and report.inputs[0].status == STATUS__OK
+    # v7.5: the cosigner's signature is valid but its nonce is unchecked: not green yet
+    assert report.verdict == VERDICT__PARTIAL and report.inputs[0].status == STATUS__OK
+    assert report.unchecked_cosigners == 1
     assert run_verify(psbt, master("letter advice cage absurd amount doctor acoustic avoid letter advice cage above", "")).verdict == VERDICT__INCOMPLETE
     # finalized multisig witness: [empty, sig, sig, witness_script]
     sigs = [psbt.inputs[0].partial_sigs[p] for p in sorted(pubs, key=lambda p: p.sec()) if p in psbt.inputs[0].partial_sigs]
     psbt.inputs[0].final_scriptwitness = script.Witness([b""] + sigs + [ws.data])
     psbt.inputs[0].partial_sigs = {}
-    assert run_verify(psbt).verdict == VERDICT__OK
+    assert run_verify(psbt).verdict == VERDICT__PARTIAL
 
 
 def test_chosen_nonce_fails():
@@ -880,7 +882,7 @@ def _multisig_psbt(cosigner_hashtype: int, finalize: bool):
 def test_cosigner_signature_must_be_all_too(finalize):
     """ Before v3 a cosigner's signature was only checked as valid: its sighash byte is checked now """
     report = run_verify(_multisig_psbt(0x01, finalize))
-    assert report.verdict == VERDICT__OK, [(i.status, i.message) for i in report.inputs]
+    assert report.verdict == VERDICT__PARTIAL, [(i.status, i.message) for i in report.inputs]
     for hashtype in DANGEROUS_SIGHASHES:
         report = run_verify(_multisig_psbt(hashtype, finalize))
         assert report.verdict == VERDICT__FAIL and "instead of ALL" in report.inputs[0].message, (hex(hashtype), report)
@@ -978,7 +980,7 @@ def test_unused_partial_signature_next_to_a_final_witness_is_checked():
     psbt = _multisig_psbt(0x01, True)
     ws = psbt.inputs[0].witness_script
     psbt.inputs[0].partial_sigs = {pub: _rfc6979_sig(C.key.secret, _sighash_ht(psbt, 0, 100_000, ws.data, 0x01), 0x01)}
-    assert run_verify(psbt).verdict == VERDICT__OK, "an extra honest ALL signature is fine"
+    assert run_verify(psbt).verdict == VERDICT__PARTIAL, "an extra honest ALL signature is fine"
     psbt.inputs[0].partial_sigs = {pub: _rfc6979_sig(C.key.secret, _sighash_ht(psbt, 0, 100_000, ws.data, 0x02), 0x02)}
     report = run_verify(psbt)
     assert report.verdict == VERDICT__FAIL and "instead of ALL" in report.inputs[0].message

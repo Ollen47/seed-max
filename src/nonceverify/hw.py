@@ -31,16 +31,30 @@ BLOCKED_MODULES = (
     "seedsigner.helpers.ur2",
 )
 
+# v7.5 (independent review): modules that can write to the microSD (Settings.save writes
+# settings.json; MicroSD watches the card; camera.py and the GUI pull Settings in). Blocked
+# from the moment the guard is installed. Not in the fatal list checked right after the
+# drivers: the Max's ILI9486 driver reads the "Display speed" setting through Settings
+# inside a try/except, so it may already be loaded; it only reads, and the card is
+# remounted read-only before anything runs anyway (storage.py).
+PERSISTENCE_MODULES = (
+    "seedsigner.models.settings",
+    "seedsigner.hardware.microsd",
+    "seedsigner.hardware.camera",
+    "seedsigner.gui",
+)
+
 
 class ImportGuard(importlib.abc.MetaPathFinder):
-    def __init__(self, blocked=BLOCKED_MODULES):
+    def __init__(self, blocked=BLOCKED_MODULES + PERSISTENCE_MODULES):
         self.blocked = tuple(blocked)
         self.attempts = []
 
     def find_spec(self, fullname, path=None, target=None):
         for name in self.blocked:
             if fullname == name or fullname.startswith(name + "."):
-                self.attempts.append(fullname)
+                if fullname not in self.attempts:        # a driver may retry on every frame
+                    self.attempts.append(fullname)
                 raise ModuleNotFoundError(f"nonceverify: '{fullname}' is not allowed on the verifier SD",
                                           name=fullname)
         return None

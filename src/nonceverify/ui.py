@@ -289,6 +289,18 @@ def label_value(d, x: int, y: int, label: str, value: str, value_color=TEXT, val
     d.text((x, y + 16), value, fill=value_color, font=font(value_size, bold=True, mono=True))
 
 
+# v7.5: periodic checks every screen loop runs (the microSD guard, see storage.py)
+housekeeping_hooks = []
+
+
+def housekeeping(hw=None):
+    for hook in list(housekeeping_hooks):
+        try:
+            hook()
+        except Exception:
+            pass                       # never breaks a screen
+
+
 class Screen:
     """ Base: draw once, then wait for a tap on one of `self.buttons` """
     step = None                       # header step (0 SEED, 1 PSBT, 2 ESITO) or None
@@ -321,6 +333,7 @@ class Screen:
         started = time.monotonic()
         tick = getattr(hw, "battery_tick", None)
         while True:
+            housekeeping(hw)
             if tick is not None and tick():
                 hw.show(self.render())
             for event in hw.poll():
@@ -439,6 +452,58 @@ class KeyboardScreen(Screen):
                     self.text = self.text[:-1]
                 elif kind == "done":
                     return ("done", self.text)
+                return "__redraw__"
+        return None
+
+
+class NumberPadScreen(Screen):
+    """ v7.5: digits only (the explorer's "Go to #" opened the passphrase keyboard) """
+    KEYS_TOP = TOP + 64
+    KEY_H = 60
+    MAX_DIGITS = 10
+
+    def __init__(self, title_text: str, text: str = ""):
+        super().__init__()
+        self.title_text, self.text = title_text, text
+
+    def keys(self):
+        out = []
+        width = (WIDTH - 6 * PAD) / 5
+        for n, digit in enumerate("1234567890"):
+            col, row = n % 5, n // 5
+            x = PAD + col * (width + PAD)
+            y = self.KEYS_TOP + row * (self.KEY_H + 8)
+            out.append(Button((x, y, x + width, y + self.KEY_H), digit, value=("digit", digit), size=26))
+        out.append(Button((WIDTH - PAD - 90, TOP + 8, WIDTH - PAD, TOP + 50), "", value=("erase", None),
+                          icon_name="erase"))
+        out += bottom_row(["Cancel", "Go"], primary_index=1, values=[("cancel", None), ("done", None)])
+        return out
+
+    def render(self):
+        self.buttons = self.keys()
+        image, d = new_canvas()
+        header(d, None, "EXPLORER")
+        d.text((PAD, TOP + 2), self.title_text, fill=DIM, font=font(14, bold=True), anchor="lt")
+        d.rounded_rectangle((PAD, TOP + 20, WIDTH - PAD - 100, TOP + 50), radius=5, fill=PANEL, outline=ACCENT)
+        d.text((2 * PAD, TOP + 35), (self.text or "") + "_", fill=TEXT, font=font(22, bold=True, mono=True),
+               anchor="lm")
+        for b in self.buttons:
+            b.draw(d)
+        return image
+
+    def on_event(self, event):
+        if event.kind != Event.TAP:
+            return None
+        for b in self.keys():
+            if b.contains(event.x, event.y, margin=1):
+                kind, arg = b.value
+                if kind == "digit":
+                    if len(self.text) < self.MAX_DIGITS:
+                        self.text += arg
+                elif kind == "erase":
+                    self.text = self.text[:-1]
+                else:
+                    return (kind, self.text)
                 return "__redraw__"
         return None
 

@@ -11,7 +11,9 @@ scanned and searched for, by derivation, among the addresses of the loaded seed:
   backup, never trusted blindly. Its checksum (BIP380) must be right, and the seed loaded
   must be one of its keys, by derivation: the key labelled with this seed's fingerprint
   must BE this seed's key at that path. The cosigners' keys can only be compared by eye
-  with the backup, so they are shown (fingerprint, path, start and end of the xpub).
+  with the backup: they are shown in full, and (v7.5) the user must find on the paper two
+  groups of each one picked at random by the device: start and end can be forged with
+  look-alike keys, and so can the BIP380 checksum (an error-detecting code, not a MAC).
 
 Standard library only, as the rest of the verifier: BIP32 public derivation, multisig
 scripts, bech32 / base58 decoding, BIP380 checksums, a CBOR reader for UR crypto-output.
@@ -107,6 +109,29 @@ class Address:
     script_pubkey: bytes
     kind: str
     network: str            # "main" or "test"
+    amount: str = None      # v7.5: BIP21 amount, as written
+    extras: list = field(default_factory=list)  # v7.5: other BIP21 parameter names (lightning, pj, ...)
+
+
+# v7.5: BIP21 parameters that only describe the payment. Anything else (lightning=, pj=,
+# req-...) is another payment instruction riding on the same QR: a payer's wallet may
+# follow it instead of paying the address (independent review, 10 Nov 2026).
+BIP21_DESCRIPTIVE = ("amount", "label", "message")
+
+
+def _bip21_params(query: str):
+    """ (amount or None, [other parameter names]) """
+    amount, extras = None, []
+    for item in query.split("&") if query else []:
+        if not item:
+            continue
+        key, _, value = item.partition("=")
+        key = key.lower()
+        if key == "amount":
+            amount = value
+        elif key not in BIP21_DESCRIPTIVE:
+            extras.append(key[:24])
+    return amount, extras
 
 
 def parse_address(payload) -> Address:
@@ -120,8 +145,10 @@ def parse_address(payload) -> Address:
         except UnicodeDecodeError:
             raise AddressError("this QR is not an address")
     text = payload.strip()
+    amount, extras = None, []
     if text.lower().startswith("bitcoin:"):
-        text = text[8:].split("?", 1)[0]
+        text, _, query = text[8:].partition("?")
+        amount, extras = _bip21_params(query)
     if not text or len(text) > 100 or any(c.isspace() for c in text):
         raise AddressError("this QR is not an address")
     low = text.lower()
@@ -142,7 +169,8 @@ def parse_address(payload) -> Address:
             kind = KIND__P2WSH
         else:
             raise AddressError("invalid segwit program length")
-        return Address(low, bytes([0, len(program)]) + program, kind, "main" if hrp == "bc" else "test")
+        return Address(low, bytes([0, len(program)]) + program, kind, "main" if hrp == "bc" else "test",
+                       amount, extras)
     payload = b58decode_check(text)
     if len(payload) != 21:
         raise AddressError("not a Bitcoin address")
@@ -153,7 +181,7 @@ def parse_address(payload) -> Address:
     kind, network = kinds[payload[0]]
     h = payload[1:]
     spk = (b"\x76\xa9\x14" + h + b"\x88\xac") if kind == KIND__P2PKH else (b"\xa9\x14" + h + b"\x87")
-    return Address(text, spk, kind, network)
+    return Address(text, spk, kind, network, amount, extras)
 
 
 def grouped(text: str, size: int = 4) -> str:
@@ -455,6 +483,10 @@ def _parse_key(text: str) -> DescriptorKey:
             options = [_parse_index(o, False) for o in step[1:-1].split(";")]
             if len(options) != 2 or len(set(options)) != 2:
                 raise DescriptorError("bad <a;b> group")
+            if options != [0, 1]:
+                # v7.5: anything else swaps or renames receive and change (the explorer's
+                # "Receive" list would show what the check calls change)
+                raise DescriptorError("only <0;1> (receive;change) is supported")
             branches = [b + [o] for b in branches for o in options]
         else:
             i = _parse_index(step, False)

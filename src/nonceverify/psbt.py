@@ -146,6 +146,7 @@ class PSBT:
     inputs: list
     outputs: list
     xpubs: dict
+    extra_fields: int = 0      # v7.5: unknown / proprietary fields
 
 
 PSBT_MAGIC = b"psbt\xff"
@@ -170,6 +171,15 @@ _INPUT_KEYLEN = {0x00: (1,), 0x01: (1,), 0x02: (34, 66), 0x03: (1,), 0x04: (1,),
                  0x15: tuple(34 + 32 * k for k in range(129)),     # 1 + control block 33 + 32m
                  0x16: (33,), 0x17: (1,), 0x18: (1,)}
 _OUTPUT_KEYLEN = {0x00: (1,), 0x01: (1,), 0x02: (34, 66), 0x05: (1,), 0x06: (1,), 0x07: (33,)}
+
+
+# v7.5: BIP174 / BIP371 field types. Anything else (0xFC proprietary included) is counted
+# and shown: it is not on chain, but the signed PSBT travels (coordinators, cosigners)
+KNOWN_GLOBAL = {0x00, 0x01, 0xFB}
+# (0x09 proof-of-reserves and 0x0A-0x0D hash preimages are standard but carry arbitrary
+# bytes the check doesn't need: counted, review of v7.5)
+KNOWN_INPUT = set(range(0x00, 0x09)) | set(range(0x13, 0x19))
+KNOWN_OUTPUT = {0x00, 0x01, 0x02, 0x05, 0x06, 0x07}
 
 
 def parse_psbt(raw: bytes) -> PSBT:
@@ -198,6 +208,7 @@ def parse_psbt(raw: bytes) -> PSBT:
     glob = read_map(_GLOBAL_KEYLEN)
     unsigned = None
     xpubs = {}
+    extra = sum(1 for k, _v in glob if k[0] not in KNOWN_GLOBAL)
     for k, v in glob:
         if k == b"\x00":
             unsigned = v
@@ -216,6 +227,7 @@ def parse_psbt(raw: bytes) -> PSBT:
         inp = PSBTInput()
         for k, v in read_map(_INPUT_KEYLEN):
             t = k[0]
+            extra += t not in KNOWN_INPUT
             if t == 0x00:
                 inp.non_witness_utxo = v
             elif t == 0x01:
@@ -252,6 +264,7 @@ def parse_psbt(raw: bytes) -> PSBT:
     for _ in tx.outputs:
         out = PSBTOutput()
         for k, v in read_map(_OUTPUT_KEYLEN):
+            extra += k[0] not in KNOWN_OUTPUT
             if k[0] == 0x00:
                 out.redeem_script = v
             elif k[0] == 0x01:
@@ -267,7 +280,7 @@ def parse_psbt(raw: bytes) -> PSBT:
         outputs.append(out)
     if not rd.done:
         raise PSBTError("extra bytes after the PSBT")
-    return PSBT(tx, inputs, outputs, xpubs)
+    return PSBT(tx, inputs, outputs, xpubs, extra)
 
 
 # ---------------------------------------------------------------------------------------
@@ -290,6 +303,15 @@ def spent_output(psbt: PSBT, index: int) -> TxOut:
     if inp.witness_utxo is None:
         raise PSBTError("the PSBT does not say which coin this input spends")
     return inp.witness_utxo
+
+
+def serialize_tx(tx: Tx, script_sigs: list, witnesses: list) -> bytes:
+    """ v7.5: `tx` with these scriptSigs and witnesses, BIP144 serialization """
+    body = (ser_varint(len(tx.inputs))
+            + b"".join(i.prevout + ser_varbytes(ss) + i.sequence for i, ss in zip(tx.inputs, script_sigs))
+            + ser_varint(len(tx.outputs)) + tx.outputs_serialized())
+    wit = b"".join(ser_varint(len(w)) + b"".join(ser_varbytes(item) for item in w) for w in witnesses)
+    return tx.version + b"\x00\x01" + body + wit + tx.locktime
 
 
 def _serialize_no_witness(tx: Tx) -> bytes:

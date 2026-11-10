@@ -321,8 +321,11 @@ def test_review_fixes_derivation_shown_and_mixed_branches_refused():
     assert [k.suffix() for k in desc.keys] == ["/<0;1>/*"] * 3
     assert A.parse_descriptor(multisig_descriptor(children="0/*")[0]).keys[0].suffix() == "/0/* (+ /1/* change)"
     first = body.index("/<0;1>/*")
-    with pytest.raises(A.DescriptorError, match="different derivations"):
+    # v7.5: <1;0> is refused outright (receive and change swapped), before the mix check
+    with pytest.raises(A.DescriptorError, match="only <0;1>"):
         A.parse_descriptor(body[:first] + "/<1;0>/*" + body[first + 8:])
+    with pytest.raises(A.DescriptorError, match="different derivations"):
+        A.parse_descriptor(body[:first] + "/0/*" + body[first + 8:])
     with pytest.raises(A.DescriptorError):
         A.parse_descriptor(body.replace("<0;1>", "<0;1;2>"))
 

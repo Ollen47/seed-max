@@ -25,7 +25,7 @@ pytest.importorskip("pyzbar.pyzbar")
 from embit import script                                                          # noqa: E402
 from embit.networks import NETWORKS                                               # noqa: E402
 from test_nonceverify import embit_root, p2wpkh_psbt                              # noqa: E402
-from test_nonceverify_ui import (COLDCARD_Q, FULL, LEFT, MIDDLE, RIGHT, SAME_TXID, SEEDSIGNER,  # noqa: E402
+from test_nonceverify_ui import (WIPE, DESCRIPTOR_CONFIRM, COLDCARD_Q, FULL, LEFT, MIDDLE, RIGHT, SAME_TXID, ENDING_OK, SEEDSIGNER,  # noqa: E402
     SIGNER_BUTTON, TREZOR, FakeHardware, Stop, hint_shown, load_seed_script, text_mode_zbar, ur_parts)
 from test_nonceverify_address import OTHER1, multisig_descriptor                  # noqa: E402
 
@@ -64,8 +64,8 @@ def test_signer_fixed_as_soon_as_a_scan_starts(monkeypatch):
     psbt.sign_with(embit_root())
     script_ = load_seed_script(shots=False) + TREZOR + [RIGHT, ("blank",), BACK_FROM_CAMERA]
     script_ += [SIGNER_BUTTON, SIGNER_BUTTON, ("shot", "50_locked_before_any_result")]
-    script_ += [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ("shot", "51_result")]
-    script_ += [RIGHT, ("blank",), BACK_FROM_CAMERA, LEFT]                        # Next PSBT, back, Change seed
+    script_ += [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ENDING_OK, ("shot", "51_result")]
+    script_ += [RIGHT, ("blank",), BACK_FROM_CAMERA, LEFT, WIPE]                  # Next PSBT, back, Change seed, Wipe
     script_ += load_seed_script(shots=False)[1:] + [("shot", "52_new_session"), ("stop",)]
     hw = FakeHardware(script_)
     session = app.Session()
@@ -98,7 +98,7 @@ def test_green_needs_the_txid_and_a_different_txid_is_red(monkeypatch):
     psbt, keys, amounts = p2wpkh_psbt(2)
     psbt.sign_with(embit_root())
     script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script_ += [("shot", "53_txid_step"), SAME_TXID, ("shot", "54_green")]
+    script_ += [("shot", "53_txid_step"), SAME_TXID, ENDING_OK, ("shot", "54_green")]
     script_ += [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [LEFT, ("shot", "55_txid_different"), ("stop",)]
     hw = FakeHardware(script_)
     with pytest.raises(Stop):
@@ -148,7 +148,7 @@ def test_address_multisig_flow_with_the_descriptor_backup():
     receive = _addr(ed.derive(4, branch_index=0).script_pubkey())
     change = _addr(ed.derive(2, branch_index=1).script_pubkey())
     script_ = load_seed_script(shots=False) + [MIDDLE, MULTI, ("blank",), ("qr", text)]
-    script_ += [("shot", "60_descriptor"), RIGHT, ("blank",), ("qr", receive), ("shot", "61_multisig_receive")]
+    script_ += [("shot", "60_descriptor")] + DESCRIPTOR_CONFIRM + [("blank",), ("qr", receive), ("shot", "61_multisig_receive")]
     script_ += [LEFT, MIDDLE, ("shot", "62_mode_with_descriptor"), MULTI, ("qr", change), ("shot", "63_multisig_change")]
     script_ += [LEFT, ("stop",)]
     hw = FakeHardware(script_)

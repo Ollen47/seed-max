@@ -43,6 +43,7 @@ STATUS__FOREIGN = "foreign"           # not spent by this seed, no signature at 
 VERDICT__OK = "ok"
 VERDICT__FAIL = "fail"
 VERDICT__INCOMPLETE = "incomplete"
+VERDICT__PARTIAL = "partial"          # v7.5: this seed's signatures clean, cosigners' not checked yet
 
 HALF_N = crypto.N // 2
 LOW_R_LIMIT = 1 << 255                # r below this fits 32 bytes in DER (low R)
@@ -63,8 +64,11 @@ class InputResult:
     message: str = ""
     counter: int = None               # RFC 6979 retry counter (0 = no grinding)
     r: int = None
-    cosigners: int = 0                # multisig: signatures of other keys (not checked here)
+    cosigners: int = 0                # multisig: signatures of other keys (their nonce not checked here)
+    checked_sigs: list = field(default_factory=list)    # v7.5: (pubkey, sig) of this seed, nonce verified
+    cosigner_sigs: list = field(default_factory=list)   # v7.5: (pubkey, sig) of other keys: valid, ALL, low s
     unsupported: bool = False         # a script type this method can't check (Taproot, legacy)
+    stray_bip32: int = 0              # v7.5: BIP32 entries for keys that aren't in the input's script
 
 
 @dataclass
@@ -90,6 +94,9 @@ class Report:
     locktime: int = 0
     version: int = 2
     tx_problem: str = ""
+    unchecked_cosigners: int = 0      # v7.5: cosigner signatures whose nonce no seed has checked yet
+    extra_fields: int = 0             # v7.5: unknown / proprietary PSBT fields (not on chain)
+    broadcast_tx: bytes = None        # v7.5: the transaction verified here, ready to broadcast
 
 
 class InputFail(Exception):
@@ -251,6 +258,10 @@ def _spend_script(utxo, inp):
         kind = script_type(redeem)
         if kind not in (SCRIPT__P2WPKH, SCRIPT__P2WSH):
             return None, "legacy P2SH input: not supported", None
+    elif kind not in (SCRIPT__P2WPKH, SCRIPT__P2WSH):
+        # v7.5: a finalized legacy input carries its signature in the scriptSig: not the
+        # "native SegWit" error below, the same "not supported" as before finalizing
+        return None, "legacy input: not supported", None
     elif inp.final_script_sig:
         raise InputFail("non-empty scriptSig on a native SegWit input")
 
@@ -356,6 +367,10 @@ def _signatures(kind, inp, multisig, tx, index, amount):
             raise InputFail(sighash_problem(sig[-1]))
         code = p2pkh_script(pubkey) if kind == "wpkh" else multisig_script
         r, s = crypto.der_decode(sig[:-1])
+        if s > HALF_N:
+            # v7.5: cosigners' signatures too. Flipping s -> N - s on a signature already
+            # in the PSBT would be a free bit for the last signer
+            raise InputFail("high s: non-standard, and a free bit for a covert channel")
         z = int.from_bytes(bip143_sighash(tx, index, code, amount, sig[-1]), "big")
         return crypto.ecdsa_verify(crypto.pubkey_decode(pubkey), z, r, s)
 
@@ -533,6 +548,10 @@ def _check_input(psbt, index, finder, seen_r, policy, scan_progress):
                 ours = {pk: finder.by_pubkey[pk] for pk in extra[1] if pk in finder.by_pubkey}
 
         sigs = _signatures(kind, inp, extra, psbt.tx, index, utxo.value)
+        # v7.5 review: BIP32 entries for keys that the script doesn't contain are free bytes
+        # (fake pubkeys, long paths): counted with the unknown fields
+        script_keys = set(extra[1]) if kind == "wsh" else {pk for pk in inp.bip32 if crypto.hash160(pk) == extra}
+        result.stray_bip32 = sum(1 for pk in inp.bip32 if pk not in script_keys)
 
         if not ours:
             if sigs:
@@ -552,10 +571,12 @@ def _check_input(psbt, index, finder, seen_r, policy, scan_progress):
             seen_r[r] = index
             if pk not in ours:
                 result.cosigners += 1
+                result.cosigner_sigs.append((pk, sig))
                 continue
             code = p2pkh_script(pk) if kind == "wpkh" else script_code
             z32 = bip143_sighash(psbt.tx, index, code, utxo.value, sig[-1])
             counter = _check_nonce(finder, ours[pk], z32, r, s, sig[-1], policy)
+            result.checked_sigs.append((pk, sig))
             result.counter = counter if result.counter is None else max(result.counter, counter)
             result.r = r
 
@@ -619,25 +640,102 @@ def txid(psbt: PSBT) -> str:
     """
     from dataclasses import replace
     from nonceverify.psbt import _serialize_no_witness
-    tx = replace(psbt.tx, inputs=[replace(txin, script_sig=inp.final_script_sig or txin.script_sig)
-                                  for txin, inp in zip(psbt.tx.inputs, psbt.inputs)])
+    tx = replace(psbt.tx, inputs=[replace(txin, script_sig=_script_sig_for_txid(psbt, i))
+                                  for i, txin in enumerate(psbt.tx.inputs)])
     return crypto.dsha256(_serialize_no_witness(tx))[::-1].hex()
 
 
+def _script_sig_for_txid(psbt: PSBT, index: int) -> bytes:
+    """
+    The scriptSig the input will have once finalized. v7.5: an unfinalized nested segwit
+    input (P2SH-P2WPKH / P2SH-P2WSH) will carry push(redeem script), which is part of
+    the txid; before, the txid shown left it out and differed from Sparrow's.
+    """
+    inp, txin = psbt.inputs[index], psbt.tx.inputs[index]
+    if inp.final_script_sig:
+        return inp.final_script_sig
+    if inp.redeem_script and script_type(inp.redeem_script) in (SCRIPT__P2WPKH, SCRIPT__P2WSH):
+        try:
+            spk = spent_output(psbt, index).script_pubkey
+        except PSBTError:
+            return txin.script_sig
+        if script_type(spk) == SCRIPT__P2SH and spk[2:22] == crypto.hash160(inp.redeem_script):
+            return push(inp.redeem_script)
+    return txin.script_sig
+
+
+# ---------------------------------------------------------------------------------------
+# v7.5: the transaction as it will be broadcast, made here from the verified signatures
+# ---------------------------------------------------------------------------------------
+def build_broadcast_tx(psbt: PSBT, report: Report):
+    """
+    The final transaction, serialized with its witnesses, built ONLY from signatures this
+    run has checked: this seed's (nonce verified) and the cosigners' (valid, ALL, low s).
+    None if any input can't be completed (unsigned, foreign, legacy, Taproot).
+
+    Why (independent review, 10 Nov 2026): a segwit txid does not commit to the
+    witnesses. A green on the QR scanned proves nothing about a DIFFERENT set of
+    witnesses for the same txid (a signer that shows a clean QR and writes leaking
+    signatures to its file, or a compromised coordinator). Broadcasting exactly these
+    bytes closes that gap.
+    """
+    from nonceverify.psbt import serialize_tx
+    script_sigs, witnesses = [], []
+    for index, (inp, result) in enumerate(zip(psbt.inputs, report.inputs)):
+        if result.status != STATUS__OK:
+            return None
+        try:
+            utxo = spent_output(psbt, index)
+            kind, script_code, extra = _spend_script(utxo, inp)
+        except (PSBTError, InputFail, ValueError):
+            return None
+        if kind is None:
+            return None
+        allowed = {pk: sig for pk, sig in result.checked_sigs + result.cosigner_sigs}
+        redeem = None
+        if script_type(utxo.script_pubkey) == SCRIPT__P2SH:
+            redeem = _single_push(inp.final_script_sig) if inp.final_script_sig else inp.redeem_script
+        if kind == "wpkh":
+            if len(allowed) != 1:
+                return None
+            (pk, sig), = allowed.items()
+            witness = [sig, pk]
+        else:
+            m, keys = extra
+            chosen = [(pk, allowed[pk]) for pk in keys if pk in allowed][:m]
+            if len(chosen) < m:
+                return None
+            witness = [b""] + [sig for _pk, sig in chosen] + [script_code]
+        if inp.final_witness is not None:
+            # finalized: the signatures verified are exactly the final witness's
+            # (_signatures reads them from there), so it goes out as it is
+            witness = list(inp.final_witness)
+        script_sigs.append(push(redeem) if redeem else b"")
+        witnesses.append(witness)
+    raw = serialize_tx(psbt.tx, script_sigs, witnesses)
+    from nonceverify.psbt import _serialize_no_witness, parse_tx
+    if crypto.dsha256(_serialize_no_witness(parse_tx(raw)))[::-1].hex() != report.txid:
+        return None                       # never export something whose txid isn't the one shown
+    return raw
+
+
 def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=None,
-                grinding: str = GRIND__LIBSECP) -> Report:
+                grinding: str = GRIND__LIBSECP, clean_elsewhere=frozenset()) -> Report:
     """
     Check every input of `psbt`. `progress(i, n)` is called before each input and
     `scan_progress(i, n)` while looking for a key not found at the PSBT's paths.
     `grinding`: the signer's low-R rule, GRIND__LIBSECP (libsecp256k1 wallets, Coldcard,
     Bitcoin Core, Sparrow), GRIND__EMBIT (embit: SeedSigner) or GRIND__NONE.
+    `clean_elsewhere`: (pubkey, signature) pairs whose nonce another seed of this
+    session already verified (v7.5): a cosigner signature among them counts as checked.
     """
     net = network_of(psbt)
     if grinding not in GRINDING_POLICIES:
         raise ValueError("unknown grinding policy")
     report = Report(fingerprint=master.fingerprint.hex(), network=net, txid=txid(psbt),
                     grinding=grinding, locktime=int.from_bytes(psbt.tx.locktime, "little"),
-                    version=int.from_bytes(psbt.tx.version, "little"))
+                    version=int.from_bytes(psbt.tx.version, "little"),
+                    extra_fields=getattr(psbt, "extra_fields", 0))
     finder = KeyFinder(master, psbt, net)
     seen_r = {}
     total_in = 0
@@ -688,6 +786,19 @@ def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=N
         report.verdict = VERDICT__INCOMPLETE
         report.summary = "verification incomplete"
     else:
-        report.verdict = VERDICT__OK
+        # v7.5 (independent review): a cosigner's signature is checked for validity, ALL
+        # and low s, but its nonce can only be recomputed with ITS seed. One SeedSigner
+        # signing for two seeds of the same multisig could leak the other seed through
+        # that signature: no green until another seed of this session has verified it.
+        report.unchecked_cosigners = sum(1 for r in report.inputs for c in r.cosigner_sigs
+                                         if c not in clean_elsewhere)
+        report.verdict = VERDICT__PARTIAL if report.unchecked_cosigners else VERDICT__OK
         report.summary = "nonces verified"
+    report.extra_fields += sum(r.stray_bip32 for r in report.inputs)
+    if report.verdict in (VERDICT__OK, VERDICT__PARTIAL):
+        report.broadcast_tx = build_broadcast_tx(psbt, report)
+    if report.verdict == VERDICT__OK and report.broadcast_tx is None:
+        # v7.5 review: this seed's signatures are clean but the transaction can't be
+        # completed here (an input not signed yet, a foreign one): never "broadcast"
+        report.verdict = VERDICT__PARTIAL
     return report

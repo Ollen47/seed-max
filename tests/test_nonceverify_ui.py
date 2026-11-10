@@ -120,9 +120,30 @@ RIGHT = ("tap", 357, 288)
 FULL = ("tap", 240, 288)
 MIDDLE = FULL                               # middle of three bottom buttons ("Address" on the seed screen)
 SAME_TXID = RIGHT                           # v7: the txid step before every green
-SIGNER_BUTTON = ("tap", 240, 216)          # SeedReadyScreen: GRINDING_Y 196 .. 236
-# Taps on the signer button after a seed load (it starts empty): 1 Coldcard Q, 2 SeedSigner, 3 Trezor
-COLDCARD_Q, SEEDSIGNER, TREZOR = [SIGNER_BUTTON], [SIGNER_BUTTON] * 2, [SIGNER_BUTTON] * 3
+ENDING_OK = ("tap", 83, 168)                # v7.5: TxidEndingScreen, first option (FixedRandom puts the right one there)
+WIPE = LEFT                                 # v7.5: confirm_wipe, "Wipe" on the left ("Keep" right)
+# v7.5: a 2-of-3 descriptor with this seed's key: "Check keys", the two other keys "Same on
+# paper", then "Yes, 2 of 3"
+DESCRIPTOR_CONFIRM = [RIGHT, ("shot", "60b_key_check"), RIGHT, RIGHT, ("shot", "60c_threshold"), RIGHT]
+# v7.5: one button per device on the seed screen (GRINDING_Y 196 .. 238)
+COLDCARD_Q, SEEDSIGNER, TREZOR = [("tap", 83, 217)], [("tap", 240, 217)], [("tap", 397, 217)]
+SIGNER_BUTTON = COLDCARD_Q[0]
+
+
+class FixedRandom:
+    """ v7.5: the app's RNG made predictable: the right txid ending first, xpub groups 4 and 5 """
+    def __init__(self):
+        self.n = 0x1000
+
+    def randrange(self, n):
+        return 0
+
+    def getrandbits(self, bits):
+        self.n += 0x01010101
+        return self.n % (1 << bits)
+
+
+app.RNG = FixedRandom()
 
 
 def hint_shown(shot) -> bool:
@@ -201,7 +222,7 @@ def test_full_flow_ok():
     psbt.sign_with(embit_root())
     script = load_seed_script() + SEEDSIGNER
     script += [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script += [SAME_TXID, ("shot", "07_result_ok"), ("swipe_up",), ("swipe_up",), ("swipe_up",), ("shot", "08_result_ok_scrolled")]
+    script += [SAME_TXID, ENDING_OK, ("shot", "07_result_ok"), ("swipe_up",), ("swipe_up",), ("swipe_up",), ("shot", "08_result_ok_scrolled")]
     script += [LEFT, ("shot", "09_seed_wiped"), FULL, ("shot", "10_home_again"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
@@ -260,19 +281,18 @@ def test_wrong_passphrase_and_raw_transaction_qr():
 # ---------------------------------------------------------------------------------------
 # v3: the signer is chosen by name (Coldcard Q, SeedSigner, Trezor)
 # ---------------------------------------------------------------------------------------
-def test_signer_button_cycles_through_the_device_names():
+def test_signer_buttons_name_the_devices():
+    """ v7.5: one button per device (a cycling toggle let a missed tap pick the wrong one) """
     from nonceverify.verify import GRIND__EMBIT, GRIND__LIBSECP, GRIND__NONE
     screen = app.SeedReadyScreen("73c5da0a", 24, True)
-    assert screen.signer is None and screen.buttons[0].label == "Tap to choose", "no default signer"
-    assert screen.on_event(Event(Event.TAP, *SIGNER_BUTTON[1:])) == "__redraw__"
-    seen = []
-    for _ in range(4):
-        seen.append((screen.signer, screen.buttons[0].label if hasattr(screen.buttons[0], "label") else None,
-                     app.signer_grinding(screen.signer)))
-        assert screen.on_event(Event(Event.TAP, *SIGNER_BUTTON[1:])) == "__redraw__"
-    assert [s[0] for s in seen] == ["coldcard_q", "seedsigner", "trezor", "coldcard_q"]
-    assert [s[2] for s in seen] == [GRIND__LIBSECP, GRIND__EMBIT, GRIND__NONE, GRIND__LIBSECP]
-    assert [app.signer_name(s[0]) for s in seen] == ["Coldcard Q", "SeedSigner", "Trezor", "Coldcard Q"]
+    assert screen.signer is None and not any(b.primary for b in screen.buttons[:3]), "no default signer"
+    for taps, signer, rule in ((COLDCARD_Q, "coldcard_q", GRIND__LIBSECP), (SEEDSIGNER, "seedsigner", GRIND__EMBIT),
+                               (TREZOR, "trezor", GRIND__NONE), (COLDCARD_Q, "coldcard_q", GRIND__LIBSECP)):
+        assert screen.on_event(Event(Event.TAP, *taps[0][1:])) == "__redraw__"
+        assert screen.signer == signer and app.signer_grinding(signer) == rule
+        assert [b.primary for b in screen.buttons[:3]].count(True) == 1, "the chosen one is highlighted"
+        assert screen.buttons[app.SeedReadyScreen.ORDER.index(signer)].primary
+    assert [b.label for b in screen.buttons[:3]] == ["Coldcard Q", "SeedSigner", "Trezor"]
     assert app.SeedReadyScreen("73c5da0a", 12, False, "bogus").signer is None, "unknown -> must choose"
 
 
@@ -288,7 +308,7 @@ def _trezor_like_psbt(n_inputs=8):
     return psbt
 
 
-def _run_trezor_flow(taps_on_signer, monkeypatch, expect_green=False):
+def _run_trezor_flow(signer_taps, monkeypatch, expect_green=False):
     shown = []
     real = app.ResultScreen
 
@@ -298,10 +318,10 @@ def _run_trezor_flow(taps_on_signer, monkeypatch, expect_green=False):
             super().__init__(report, signer, **kwargs)
     monkeypatch.setattr(app, "ResultScreen", Spy)
     psbt = _trezor_like_psbt()
-    script = load_seed_script(shots=False) + [SIGNER_BUTTON] * taps_on_signer
-    script += [("shot", f"16_signer_{taps_on_signer}")]
-    script += [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script += ([SAME_TXID] if expect_green else []) + [("shot", "17_result"), ("stop",)]
+    script = load_seed_script(shots=False) + signer_taps
+    script += [("shot", f"16_signer_{signer_taps[0][1]}")]
+    script += [RIGHT] + ([FULL] if signer_taps == COLDCARD_Q else []) + [("blank",)] + ur_parts(psbt.serialize())
+    script += ([SAME_TXID, ENDING_OK] if expect_green else []) + [("shot", "17_result"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
         app.run(hw)
@@ -314,10 +334,10 @@ def test_trezor_signature_is_green_with_trezor_and_red_with_coldcard(monkeypatch
     The same no-grinding signatures: "Trezor" (first nonce, no retry) verifies them; the
     default "Coldcard Q" (libsecp, low R) must reject them, or a signer could pick either.
     """
-    hw = _run_trezor_flow(3, monkeypatch, True)  # (none) -> Coldcard Q -> SeedSigner -> Trezor
+    hw = _run_trezor_flow(TREZOR, monkeypatch, True)
     assert hw.shots["17_result"].getpixel((240, 34)) == ui.GREEN
     assert hw.result_signers == ["trezor"], "the result names the signer chosen"
-    hw = _run_trezor_flow(1, monkeypatch)        # Coldcard Q
+    hw = _run_trezor_flow(COLDCARD_Q, monkeypatch)
     assert hw.shots["17_result"].getpixel((240, 34)) == ui.RED
     assert hw.result_signers == ["coldcard_q"]
 
@@ -339,8 +359,8 @@ def test_scan_needs_a_signer_after_every_seed_load():
     psbt.sign_with(embit_root())
     script = load_seed_script(shots=False)
     script += [RIGHT, ("shot", "18_must_choose")]                 # nothing chosen: stays here
-    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ("shot", "19_green")]
-    script += [LEFT, FULL]                                        # Fine: seed wiped, home
+    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ENDING_OK, ("shot", "19_green")]
+    script += [LEFT, WIPE, FULL]                                  # Finish, Wipe (v7.5): seed wiped, home
     script += load_seed_script(shots=False)[1:] + [RIGHT, ("shot", "20_must_choose_again"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
@@ -371,13 +391,13 @@ def test_the_signer_cannot_change_within_a_seed_session(monkeypatch):
             shown.append((signer, report.txid, report.verdict))
             super().__init__(report, signer, **kwargs)
     monkeypatch.setattr(app, "ResultScreen", Spy)
-    script = load_seed_script(shots=False) + COLDCARD_Q + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
+    script = load_seed_script(shots=False) + COLDCARD_Q + [RIGHT, FULL, ("blank",)] + ur_parts(psbt.serialize())
     script += [("shot", "21_red")]
     script += [RIGHT, ("blank",), ("tap", 40, 240)]               # Altra PSBT, then back to the seed screen
-    script += [SIGNER_BUTTON, SIGNER_BUTTON, ("shot", "22_locked")]
+    script += TREZOR + TREZOR + [("shot", "22_locked")]
     script += [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [("shot", "23_same_tx_red")]
     script += [RIGHT, ("blank",)] + ur_parts(second.serialize()) + [("shot", "24_next_tx_red")]
-    script += [LEFT, FULL] + load_seed_script(shots=False)[1:] + TREZOR
+    script += [LEFT, WIPE, FULL] + load_seed_script(shots=False)[1:] + TREZOR
     script += [RIGHT, ("blank",)] + ur_parts(second.serialize()) + [("shot", "25_new_session"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
@@ -394,7 +414,7 @@ def test_the_signer_cannot_change_within_a_seed_session(monkeypatch):
 def test_locked_seed_screen_unit():
     screen = app.SeedReadyScreen("73c5da0a", 24, True, "coldcard_q", locked=True)
     for _ in range(3):
-        assert screen.on_event(Event(Event.TAP, *SIGNER_BUTTON[1:])) == "__redraw__"
+        assert screen.on_event(Event(Event.TAP, *TREZOR[0][1:])) == "__redraw__"
     assert screen.signer == "coldcard_q" and screen.locked_hint
     assert screen.on_event(Event(Event.TAP, *RIGHT[1:])) == "scan_psbt"
     assert app.SeedReadyScreen("73c5da0a", 24, True, None, locked=True).locked is False, "nothing to lock yet"
@@ -524,7 +544,7 @@ def test_typed_seed_gives_the_same_wallet_and_verifies():
     psbt, keys, amounts = p2wpkh_psbt(2)
     psbt.sign_with(embit_root())
     script = typed_seed_script(MNEMONIC.split()) + _after_review() + [("shot", "33_seed_ready")]
-    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ("shot", "34_result"), ("stop",)]
+    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ENDING_OK, ("shot", "34_result"), ("stop",)]
     hw = FakeHardware(script)
     session = app.Session()
     with pytest.raises(Stop):
@@ -559,7 +579,7 @@ def test_a_wrong_word_is_caught_and_fixed_from_the_review():
     hw = FakeHardware(script)
     with pytest.raises(Stop):
         app.run(hw)
-    assert hw.shots["37_bad_checksum"].getpixel((252, 272)) == ui.RED
+    assert hw.shots["37_bad_checksum"].getpixel((340, 272)) == ui.RED      # v7.5: Cancel / Show / Confirm
     shot = hw.shots["39_passphrase_question"]
     assert any(shot.getpixel((x, y)) == ui.GREEN for x in range(ui.PAD, ui.PAD + 28) for y in range(ui.TOP + 4, ui.TOP + 28)), \
         "fixed: the passphrase question opens with the green 'checksum corretto'"
@@ -572,13 +592,13 @@ def test_back_goes_to_the_previous_word_and_cancel_goes_home():
     script += [CONTROL["erase"]] * 3 + type_word(words[0])
     for w in words[1:]:
         script += type_word(w)
-    script += [("shot", "40_review_ok"), LEFT, ("shot", "40b_confirm"), RIGHT, ("shot", "41_home"), ("stop",)]  # Annulla tutto
+    script += [("shot", "40_review_ok"), LEFT, ("shot", "40b_confirm"), LEFT, ("shot", "41_home"), ("stop",)]  # v7.5: Erase all, left
     hw = FakeHardware(script)
     session = app.Session()
     with pytest.raises(Stop):
         app.run(hw, session)
     assert session.master is None, "cancelled: no seed loaded"
-    assert hw.shots["40_review_ok"].getpixel((252, 272)) == ui.ACCENT, "valid checksum: Conferma"
+    assert hw.shots["40_review_ok"].getpixel((340, 272)) == ui.ACCENT, "valid checksum: Confirm"
 
 
 def test_word_list_is_cleared_after_entry(monkeypatch):
@@ -604,7 +624,7 @@ def test_cancel_asks_before_discarding_typed_words():
     script = [SPLASH_START, TYPE_SEED, WORDS_12]
     for w in words[:5]:
         script += type_word(w)
-    script += [CONTROL["cancel"], ("shot", "42_confirm"), LEFT]                 # Continua
+    script += [CONTROL["cancel"], ("shot", "42_confirm"), RIGHT]                # v7.5: Keep typing, right
     for w in words[5:]:
         script += type_word(w)
     script += [RIGHT, ("shot", "43_passphrase_question"), ("stop",)]            # Conferma on the review

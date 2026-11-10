@@ -13,7 +13,7 @@ pytest.importorskip("qrcode")
 from embit import script                                                          # noqa: E402
 from embit.descriptor import Descriptor as EDescriptor                            # noqa: E402
 from test_nonceverify_address import eaddr, eroot, master, multisig_descriptor    # noqa: E402
-from test_nonceverify_ui import (FULL, LEFT, MIDDLE, RIGHT, FakeHardware, Stop,   # noqa: E402
+from test_nonceverify_ui import (DESCRIPTOR_CONFIRM, FULL, LEFT, MIDDLE, RIGHT, FakeHardware, Stop,   # noqa: E402
     load_seed_script, text_mode_zbar, type_text)                                  # noqa: F401
 
 def decode_qr(image):
@@ -29,10 +29,20 @@ NATIVE = ("tap", 122, 104)              # ExplorerWalletScreen
 NESTED = ("tap", 357, 104)
 LEGACY = ("tap", 122, 170)
 MULTISIG = ("tap", 357, 170)
-TOGGLE = ("tap", 80, 57)
+TOGGLE = ("tap", 116, 57)               # v7.5: the "Chg" segment
 ACCT_PLUS = ("tap", 312, 57)
 GOTO = ("tap", 410, 57)
 PREV = ("tap", 240, 288)
+
+
+def numpad(text):
+    """ v7.5: taps on the explorer's number pad (5 x 2 digits), then "Go" """
+    pad = ui.NumberPadScreen("Go to address #")
+    taps = []
+    for ch in text:
+        b = next(b for b in pad.keys() if b.value == ("digit", ch))
+        taps.append(("tap", int((b.rect[0] + b.rect[2]) / 2), int((b.rect[1] + b.rect[3]) / 2)))
+    return taps + [("tap", 357, 288)]
 
 
 def row(i):
@@ -80,7 +90,7 @@ def test_explorer_flow_single_sig():
     first = eaddr(script.p2wpkh(root.derive("m/84h/0h/0h/0/0").key.get_public_key()))
     script_ = load_seed_script(shots=False) + [MIDDLE, EXPLORER, ("shot", "80_wallets"), NATIVE, ("shot", "81_list")]
     script_ += [row(0), ("shot", "82_detail"), FULL, RIGHT, ("shot", "83_page2"), TOGGLE, ("shot", "84_change"),
-                ACCT_PLUS, ("shot", "85_account1"), GOTO] + type_text("100") + [("tap", 425, 280), ("shot", "86_goto"),
+                ACCT_PLUS, ("shot", "85_account1"), GOTO, ("shot", "85b_numpad")] + numpad("100") + [("shot", "86_goto"),
                 row(2), ("shot", "87_detail_102"), ("stop",)]
     hw = FakeHardware(script_)
     seen = []
@@ -108,7 +118,7 @@ def test_explorer_flow_single_sig():
 def test_explorer_flow_multisig_uses_the_session_descriptor():
     text, _ = multisig_descriptor()
     ed = EDescriptor.from_string(text.split("#")[0])
-    script_ = load_seed_script(shots=False) + [MIDDLE, EXPLORER, MULTISIG, ("blank",), ("qr", text), RIGHT]
+    script_ = load_seed_script(shots=False) + [MIDDLE, EXPLORER, MULTISIG, ("blank",), ("qr", text)] + DESCRIPTOR_CONFIRM
     script_ += [("shot", "88_multisig_list"), TOGGLE, row(3), ("shot", "89_multisig_detail"), ("stop",)]
     hw = FakeHardware(script_)
     session = app.Session()
@@ -124,5 +134,5 @@ def test_list_screen_events():
     e = A.SinglesigExplorer(master(), 84, 0)
     s = app.ExplorerListScreen(e, False, 0, True)
     assert s.on_event(Event(Event.SWIPE_UP, 240, 200)) == "next"
-    assert s.on_event(Event(Event.TAP, *row(5)[1:])) == ("row", 5)
-    assert len(s.rows) == 6 and s.rows[5][1][-1] == 5
+    assert s.on_event(Event(Event.TAP, *row(3)[1:])) == ("row", 3)
+    assert len(s.rows) == 4 and s.rows[3][1][-1] == 3

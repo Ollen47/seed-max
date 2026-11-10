@@ -194,10 +194,17 @@ class SeedReviewScreen(ui.Screen):
         super().__init__()
         self.words = words
         self.valid = seedqr.mnemonic_is_valid(" ".join(words))
-        self.buttons = ui.bottom_row(["Cancel", "Confirm" if self.valid else "Checksum wrong"],
-                                     primary_index=1 if self.valid else None, values=["cancel", "ok"])
+        # v7.5: the words are hidden until "Show" (a phone filming the screen, an audience);
+        # with a wrong checksum they are shown, since the wrong one must be found
+        self.revealed = not self.valid
+        self.make_buttons()
+
+    def make_buttons(self):
+        self.buttons = ui.bottom_row(["Cancel", "Hide" if self.revealed else "Show",
+                                      "Confirm" if self.valid else "Wrong"],
+                                     primary_index=2 if self.valid else None, values=["cancel", "reveal", "ok"])
         if not self.valid:
-            self.buttons[1].color = ui.RED
+            self.buttons[2].color = ui.RED
 
     def layout(self):
         n = len(self.words)
@@ -217,7 +224,8 @@ class SeedReviewScreen(ui.Screen):
     def draw(self, d, image):
         if self.valid:
             ui.icon(d, "ok_circle", (ui.PAD + 11, ui.TOP + 13), 20, ui.GREEN)
-            text, color = "Checksum OK: compare the words with your backup", ui.TEXT
+            text, color = ("Checksum OK: compare the words with your backup" if self.revealed else
+                           "Checksum OK · words hidden: Show to compare"), ui.TEXT
         else:
             ui.icon(d, "x_circle", (ui.PAD + 11, ui.TOP + 13), 20, ui.RED)
             text, color = "Checksum wrong: tap the wrong word", ui.RED
@@ -227,7 +235,8 @@ class SeedReviewScreen(ui.Screen):
             d.rounded_rectangle(rect, radius=4, fill=ui.PANEL, outline=ui.LINE, width=1)
             cy = (rect[1] + rect[3]) / 2
             d.text((rect[0] + 22, cy), f"{i + 1}", fill=ui.DIM, font=f_num, anchor="rm")
-            d.text((rect[0] + 28, cy), self.words[i], fill=ui.TEXT, font=f_word, anchor="lm")
+            word = self.words[i] if self.revealed else "•" * 4
+            d.text((rect[0] + 28, cy), word, fill=ui.TEXT if self.revealed else ui.DIM, font=f_word, anchor="lm")
 
     def on_event(self, event):
         if event.kind != Event.TAP:
@@ -239,6 +248,10 @@ class SeedReviewScreen(ui.Screen):
             if b.contains(event.x, event.y):
                 if b.value == "ok" and not self.valid:
                     return None                 # only a valid checksum goes on
+                if b.value == "reveal":
+                    self.revealed = not self.revealed
+                    self.make_buttons()
+                    return "__redraw__"
                 return b.value
         return None
 
@@ -249,7 +262,8 @@ def confirm_discard(hw, typed: int) -> bool:
         return True
     choice = ui.MessageScreen("Cancel the seed entry?",
                               f"The {typed} words typed so far will be erased and you will start again.",
-                              buttons=("Continue", "Cancel all"), primary_index=0, values=["keep", "drop"],
+                              # v7.5: the destructive choice on the left, "go on" where the thumb goes
+                              buttons=("Erase all", "Keep typing"), primary_index=1, values=["drop", "keep"],
                               heading_color=ui.YELLOW, icon_name="warning").run(hw)
     return choice == "drop"
 
@@ -275,7 +289,7 @@ def enter_mnemonic(hw):
                     index, reviewing = choice[1], True
                 continue
             # From the review the word is re-typed from scratch (it is the wrong one); going
-            # back with "Indietro" keeps it, to fix just its last letters
+            # back with "Back" keeps it, to fix just its last letters
             screen = WordEntryScreen(index, count, "" if reviewing else words[index],
                                      back_label="Review" if reviewing else "Back")
             result = screen.run(hw)
