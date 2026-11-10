@@ -57,10 +57,10 @@ def show_spaces(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "7.7"
+VERSION = "7.8"
 
-# v7.5: randomness for the checks that must not be predictable (txid ending options, the
-# xpub groups to find on the paper). The OS's CSPRNG; tests swap in a fixed one.
+# v7.5: randomness for the checks that must not be predictable (the xpub groups to find
+# on the paper). The OS's CSPRNG; tests swap in a fixed one.
 RNG = random.SystemRandom()
 
 
@@ -512,6 +512,7 @@ class TxidCheckScreen(ui.Screen):
     the txid with Sparrow's (the transaction tab). The nonce check says THIS PSBT is
     clean; the txid ties it to the transaction Sparrow will broadcast. In the first two
     field tests the comparison was forgotten: now it is a step that can't be skipped.
+    v7.8 (Ollen): the v7.5 quiz on the txid ending is gone: read it, then confirm.
     """
     step = 2
 
@@ -533,41 +534,13 @@ class TxidCheckScreen(ui.Screen):
             d.text((WIDTH / 2, ui.TOP + 76 + i * 38), row, fill=ui.ACCENT if i % 2 == 0 else ui.TEXT, font=f, anchor="mm")
 
 
-class TxidEndingScreen(ui.Screen):
+def can_export(report, txid_confirmed: bool) -> bool:
     """
-    v7.5 (independent review): "Same txid" sits where every "go on" button sits and invites
-    a reflex tap. After it, the user picks how Sparrow's txid ENDS among three endings (two
-    random): the answer is on Sparrow's screen, not on this one.
+    v7.5 review: the Tx QR only on green. On "this seed clean" the transaction would carry
+    the unchecked cosigner signature, or is not complete; v7.6: not with an unproven change.
     """
-    step = 2
-    OPTIONS_Y = ui.TOP + 100
-
-    def __init__(self, txid: str, rng=None):
-        super().__init__()
-        rng = rng or RNG
-        self.correct = txid[-8:]
-        options = []
-        while len(options) < 2:
-            decoy = f"{rng.getrandbits(32):08x}"
-            if decoy != self.correct and decoy not in options and decoy[-4:] != self.correct[-4:]:
-                options.append(decoy)
-        options.insert(rng.randrange(3), self.correct)
-        self.options = options
-        self.buttons = ui.button_row([f"…{o[:4]} {o[4:]}" for o in options], self.OPTIONS_Y, height=64,
-                                     values=[("ending", o) for o in options])
-        self.buttons += ui.bottom_row(["None of these"], values=["different"])
-        self.buttons[-1].color = ui.RED
-
-    def on_event(self, event):
-        value = super().on_event(event)
-        if isinstance(value, tuple):
-            return "same" if value[1] == self.correct else "different"
-        return value
-
-    def draw(self, d, image):
-        ui.title(d, "How does Sparrow's txid END?")
-        ui.paragraph(d, "Look at Sparrow, not at this screen, and tap the same ending.", ui.TOP + 34, size=17,
-                     color=ui.DIM)
+    return bool(txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK
+                and not report.change_unverified)
 
 
 class ResultScreen(ui.Screen):
@@ -609,10 +582,6 @@ class ResultScreen(ui.Screen):
                                 "that could leave with the PSBT file. Broadcast with the Tx QR, don't pass the PSBT "
                                 "on.", ui.font(15), width):
                 add(line, ui.YELLOW, 15)
-        if txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK and not report.change_unverified:
-            for line in ui.wrap("Broadcast exactly the transaction checked here: Tx QR, then in Sparrow "
-                                "File > Load Transaction > From QR, and broadcast that.", ui.font(16), width):
-                add(line, ui.ACCENT, 16)
         # v7.6: where the money goes, change proven or not, at the top
         external = [o for o in report.outputs if o.owner == OWNER__EXTERNAL]
         ours = [o for o in report.outputs if o.owner == OWNER__OURS]
@@ -628,6 +597,11 @@ class ResultScreen(ui.Screen):
                 add(line, ui.YELLOW, 15)
         if not ours and not unverified and report.verdict != VERDICT__FAIL:
             add("No change back to this wallet", ui.DIM, 15)
+        if can_export(report, txid_confirmed) and not report.change_warning:
+            # v7.8 (Ollen): the result first, then what to do with it
+            for line in ui.wrap("Broadcast THIS: tap Broadcast, then in Sparrow File > Load Transaction > "
+                                "From QR. Only these bytes are the ones checked.", ui.font(16, bold=True), width):
+                add(line, ui.ACCENT, 16)
         add(f"XFP {report.fingerprint} · {who}", ui.DIM, 15, True)
         add("txid" + (" (same as Sparrow's)" if txid_confirmed else ""), ui.DIM, 15, True)
         for row in txid_rows(report.txid):
@@ -662,12 +636,9 @@ class ResultScreen(ui.Screen):
                 add(f"     {chunk}", ui.DIM if o.owner == OWNER__EXTERNAL else color, 15, True)
         add(f"Fee: {btc(report.fee)}", ui.TEXT, 17)
         self.list = ui.ScrollList(lines, ui.HEADER_H + self.BANNER_H + 8, HEIGHT - ui.BUTTON_H - 2 * ui.PAD)
-        # v7.5 review: only on green. On "this seed clean" the transaction would carry the
-        # unchecked cosigner signature, or is not complete
-        self.can_export = bool(txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK
-                               and not report.change_unverified)
+        self.can_export = can_export(report, txid_confirmed)
         if self.can_export:
-            self.buttons = ui.bottom_row(["Finish", "Tx QR", "Next PSBT"],
+            self.buttons = ui.bottom_row(["Finish", "Broadcast", "Next PSBT"],
                                          primary_index=2 if report.change_warning else 1,
                                          values=["done", "txqr", "again"], icons=["power", "qr", "camera"])
         else:
@@ -688,7 +659,7 @@ class ResultScreen(ui.Screen):
             return ui.YELLOW, "warning", "NONCE OK · CHANGE?", "your change is somewhere unusual: see below"
         if self.report.verdict == VERDICT__OK and self.txid_confirmed:
             who = signer_name(self.signer) if self.signer in SIGNERS else None
-            what = "broadcast the Tx QR" if self.report.broadcast_tx else "broadcast"
+            what = "tap Broadcast" if self.report.broadcast_tx else "broadcast"
             return ui.GREEN, "ok_circle", "NONCE OK", (f"{who} signatures clean, txid OK: {what}"
                                                        if who else f"no covert channel, txid OK: {what}")
         if self.report.verdict == VERDICT__PARTIAL and self.txid_confirmed:
@@ -1536,9 +1507,9 @@ def check_psbt(hw, session: Session) -> str:
     lock_after_red(session, report)
     confirmed = False
     if report.verdict in (VERDICT__OK, VERDICT__PARTIAL):
-        # v7: no green before the txid has been compared with Sparrow's; v7.5: then the
-        # ending picked among three, from Sparrow's screen
-        if TxidCheckScreen(report).run(hw) == "same" and TxidEndingScreen(report.txid).run(hw) == "same":
+        # v7: no green before the txid has been compared with Sparrow's (v7.8: read and
+        # confirm, no quiz on the ending)
+        if TxidCheckScreen(report).run(hw) == "same":
             confirmed = True
             for r in report.inputs:
                 session.clean_sigs.update(r.checked_sigs)
@@ -1546,7 +1517,7 @@ def check_psbt(hw, session: Session) -> str:
             report.verdict = VERDICT__FAIL
             report.tx_problem = ("The txid is NOT the one in Sparrow: the transaction checked here is not "
                                  "the one Sparrow would broadcast. Do not broadcast.")
-            # v7.5 review: a txid mismatch (or a mis-tap on the ending) says nothing about the
+            # v7.5 review: a txid mismatch says nothing about the
             # signer: it is not recorded as red for the other seeds and devices of a multisig
     while True:
         choice = ResultScreen(report, session.signer, txid_confirmed=confirmed).run(hw)

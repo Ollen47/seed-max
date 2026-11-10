@@ -16,7 +16,7 @@ from embit.psbt import DerivationPath                                           
 from embit.transaction import TransactionOutput                                     # noqa: E402
 from test_nonceverify import embit_root, libsecp_sign_psbt, master, p2wpkh_psbt     # noqa: E402
 from test_nonceverify_address import multisig_descriptor                            # noqa: E402
-from test_nonceverify_ui import (ENDING_OK, RIGHT, SAME_TXID, SEEDSIGNER, FakeHardware, Stop,  # noqa: E402
+from test_nonceverify_ui import (RIGHT, SAME_TXID, SEEDSIGNER, FakeHardware, Stop,  # noqa: E402
     load_seed_script, text_mode_zbar, ur_parts)                                     # noqa: F401
 
 ATTACKER = "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
@@ -243,7 +243,7 @@ def test_change_check_on_the_device():
     psbt, keys, amounts = p2wpkh_psbt(2)
     psbt.sign_with(embit_root())
     script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script_ += [SAME_TXID, ENDING_OK, ("shot", "110_change_yours"), ("stop",)]
+    script_ += [SAME_TXID, ("shot", "110_change_yours"), ("stop",)]
     hw = FakeHardware(script_)
     with pytest.raises(Stop):
         app.run(hw)

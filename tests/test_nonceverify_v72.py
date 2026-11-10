@@ -15,7 +15,7 @@ pytest.importorskip("embit")
 from embit import script                                                          # noqa: E402
 from test_nonceverify import (bbqr_parts, embit_root, libsecp_sign_psbt, master,   # noqa: E402
     p2wpkh_psbt)
-from test_nonceverify_ui import (COLDCARD_Q, FULL, RIGHT, SAME_TXID, ENDING_OK, FakeHardware, Stop, text_mode_zbar,  # noqa: E402,F401
+from test_nonceverify_ui import (COLDCARD_Q, FULL, RIGHT, SAME_TXID, FakeHardware, Stop, text_mode_zbar,  # noqa: E402,F401
     load_seed_script, ur_parts)
 
 
@@ -84,7 +84,7 @@ def test_coldcard_flow_on_the_device(order):
     first, second = (final_qr, unsigned_qr) if order == "final_first" else (unsigned_qr, final_qr)
     script_ = load_seed_script(shots=False) + COLDCARD_Q + [RIGHT, FULL, ("blank",)] + first
     script_ += [("shot", "70_second_scan_prompt"), FULL, ("blank",)] + second
-    script_ += [("shot", "71_txid"), SAME_TXID, ENDING_OK, ("shot", "72_green"), ("stop",)]
+    script_ += [("shot", "71_txid"), SAME_TXID, ("shot", "72_green"), ("stop",)]
     hw = FakeHardware(script_)
     with pytest.raises(Stop):
         app.run(hw)
@@ -96,7 +96,7 @@ def test_second_scan_insists_on_the_other_kind():
     final_qr = [("qr", p) for p in bbqr_parts(final, "T")]
     script_ = load_seed_script(shots=False) + COLDCARD_Q + [RIGHT, FULL, ("blank",)] + final_qr
     script_ += [FULL, ("blank",)] + final_qr + [("shot", "73_still_scanning")] + ur_parts(unsigned)
-    script_ += [SAME_TXID, ENDING_OK, ("shot", "74_green"), ("stop",)]
+    script_ += [SAME_TXID, ("shot", "74_green"), ("stop",)]
     hw = FakeHardware(script_)
     with pytest.raises(Stop):
         app.run(hw)

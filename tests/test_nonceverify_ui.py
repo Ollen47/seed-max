@@ -120,7 +120,6 @@ RIGHT = ("tap", 357, 288)
 FULL = ("tap", 240, 288)
 MIDDLE = FULL                               # middle of three bottom buttons ("Address" on the seed screen)
 SAME_TXID = RIGHT                           # v7: the txid step before every green
-ENDING_OK = ("tap", 83, 168)                # v7.5: TxidEndingScreen, first option (FixedRandom puts the right one there)
 WIPE = LEFT                                 # v7.5: confirm_wipe, "Wipe" on the left ("Keep" right)
 # v7.5: a 2-of-3 descriptor with this seed's key: "Check keys", the two other keys "Same on
 # paper", then "Yes, 2 of 3"
@@ -131,7 +130,7 @@ SIGNER_BUTTON = COLDCARD_Q[0]
 
 
 class FixedRandom:
-    """ v7.5: the app's RNG made predictable: the right txid ending first, xpub groups 4 and 5 """
+    """ v7.5: the app's RNG made predictable: xpub groups 4 and 5 """
     def __init__(self):
         self.n = 0x1000
 
@@ -222,7 +221,7 @@ def test_full_flow_ok():
     psbt.sign_with(embit_root())
     script = load_seed_script() + SEEDSIGNER
     script += [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script += [SAME_TXID, ENDING_OK, ("shot", "07_result_ok"), ("swipe_up",), ("swipe_up",), ("swipe_up",), ("shot", "08_result_ok_scrolled")]
+    script += [SAME_TXID, ("shot", "07_result_ok"), ("swipe_up",), ("swipe_up",), ("swipe_up",), ("shot", "08_result_ok_scrolled")]
     script += [LEFT, ("shot", "09_seed_wiped"), FULL, ("shot", "10_home_again"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
@@ -321,7 +320,7 @@ def _run_trezor_flow(signer_taps, monkeypatch, expect_green=False):
     script = load_seed_script(shots=False) + signer_taps
     script += [("shot", f"16_signer_{signer_taps[0][1]}")]
     script += [RIGHT] + ([FULL] if signer_taps == COLDCARD_Q else []) + [("blank",)] + ur_parts(psbt.serialize())
-    script += ([SAME_TXID, ENDING_OK] if expect_green else []) + [("shot", "17_result"), ("stop",)]
+    script += ([SAME_TXID] if expect_green else []) + [("shot", "17_result"), ("stop",)]
     hw = FakeHardware(script)
     with pytest.raises(Stop):
         app.run(hw)
@@ -359,7 +358,7 @@ def test_scan_needs_a_signer_after_every_seed_load():
     psbt.sign_with(embit_root())
     script = load_seed_script(shots=False)
     script += [RIGHT, ("shot", "18_must_choose")]                 # nothing chosen: stays here
-    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ENDING_OK, ("shot", "19_green")]
+    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ("shot", "19_green")]
     script += [LEFT, WIPE, FULL]                                  # Finish, Wipe (v7.5): seed wiped, home
     script += load_seed_script(shots=False)[1:] + [RIGHT, ("shot", "20_must_choose_again"), ("stop",)]
     hw = FakeHardware(script)
@@ -544,7 +543,7 @@ def test_typed_seed_gives_the_same_wallet_and_verifies():
     psbt, keys, amounts = p2wpkh_psbt(2)
     psbt.sign_with(embit_root())
     script = typed_seed_script(MNEMONIC.split()) + _after_review() + [("shot", "33_seed_ready")]
-    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ENDING_OK, ("shot", "34_result"), ("stop",)]
+    script += SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize()) + [SAME_TXID, ("shot", "34_result"), ("stop",)]
     hw = FakeHardware(script)
     session = app.Session()
     with pytest.raises(Stop):

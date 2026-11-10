@@ -21,7 +21,7 @@ from embit.transaction import Transaction, TransactionInput, TransactionOutput  
 from test_nonceverify import (EVIL_K, _rfc6979_sig, _sighash_ht, der, embit_root,      # noqa: E402
     libsecp_sign_psbt, master, p2wpkh_psbt, sighash_of, sign_with_k)
 from test_nonceverify_address import multisig_descriptor                              # noqa: E402
-from test_nonceverify_ui import (DESCRIPTOR_CONFIRM, ENDING_OK, FULL, LEFT, MIDDLE, RIGHT, SAME_TXID,  # noqa: E402
+from test_nonceverify_ui import (DESCRIPTOR_CONFIRM, FULL, LEFT, MIDDLE, RIGHT, SAME_TXID,  # noqa: E402
     SEEDSIGNER, WIPE, FakeHardware, Stop, load_seed_script, text_mode_zbar, ur_parts)  # noqa: F401
 from test_nonceverify_v72 import coldcard_pair, finalize                              # noqa: E402
 
@@ -105,38 +105,45 @@ def _zbar(image):
     return found[0].data if found else None
 
 
-def test_green_result_offers_the_tx_qr_and_shows_it():
+def _tx_qr_part(shot):
+    qr = shot.crop((ui.PAD, ui.TOP, ui.PAD + app.BroadcastScreen.QR_BOX, ui.TOP + app.BroadcastScreen.QR_BOX))
+    found = _zbar(qr)
+    return found.decode() if found else None
+
+
+def test_green_result_first_then_broadcast_shows_the_tx_qr():
+    """ v7.8 (Ollen): the result first, with "Broadcast THIS"; the Broadcast button shows the Tx QR """
     psbt, keys, amounts = p2wpkh_psbt(2)
     psbt.sign_with(embit_root())
     script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script_ += [SAME_TXID, ENDING_OK, ("shot", "90_green_txqr"), FULL, ("shot", "91_broadcast_qr"), FULL,
+    script_ += [SAME_TXID, ("shot", "90_green_result"), FULL, ("shot", "91_tx_qr"), FULL,
                 ("shot", "92_back_to_result")]
     hw = run(script_)
-    assert banner(hw.shots["90_green_txqr"]) == ui.GREEN
-    shot = hw.shots["91_broadcast_qr"]
-    qr = shot.crop((ui.PAD, ui.TOP, ui.PAD + app.BroadcastScreen.QR_BOX, ui.TOP + app.BroadcastScreen.QR_BOX))
-    part = _zbar(qr).decode()
-    assert part.startswith("B$2T"), part[:8]
+    assert banner(hw.shots["90_green_result"]) == ui.GREEN
+    assert _tx_qr_part(hw.shots["90_green_result"]) is None, "no Tx QR before the result"
+    assert _tx_qr_part(hw.shots["91_tx_qr"]).startswith("B$2T")
     assert banner(hw.shots["92_back_to_result"]) == ui.GREEN
 
 
-def test_wrong_txid_ending_is_red():
+def test_txid_different_is_red():
+    """ v7.8: "Different" on the txid step is red, at once """
     psbt, keys, amounts = p2wpkh_psbt(1)
     psbt.sign_with(embit_root())
-    wrong = ("tap", 240, 168)                       # FixedRandom: the right ending is the first
     script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
-    script_ += [SAME_TXID, ("shot", "93_ending_choice"), wrong, ("shot", "94_ending_wrong")]
+    script_ += [LEFT, ("shot", "94_txid_different")]
     hw = run(script_)
-    assert banner(hw.shots["94_ending_wrong"]) == ui.RED
+    assert banner(hw.shots["94_txid_different"]) == ui.RED
 
 
-def test_txid_ending_screen_options():
-    screen = app.TxidEndingScreen("ab" * 28 + "12345678", rng=app.random.Random(7))
-    assert screen.options.count("12345678") == 1 and len(set(screen.options)) == 3
-    assert all(o[-4:] != "5678" for o in screen.options if o != "12345678"), "decoys differ at the end"
-    right = screen.buttons[screen.options.index("12345678")]
-    x, y = (right.rect[0] + right.rect[2]) / 2, (right.rect[1] + right.rect[3]) / 2
-    assert screen.on_event(Event(Event.TAP, x, y)) == "same"
+def test_no_quiz_on_the_txid_ending():
+    """ v7.8 (Ollen, 10 Nov 2026): read the txid and confirm, no multiple choice after it """
+    assert not hasattr(app, "TxidEndingScreen")
+    psbt, keys, amounts = p2wpkh_psbt(1)
+    psbt.sign_with(embit_root())
+    script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + ur_parts(psbt.serialize())
+    script_ += [SAME_TXID, ("shot", "93_green_at_once")]
+    hw = run(script_)
+    assert banner(hw.shots["93_green_at_once"]) == ui.GREEN
 
 
 # ---------------------------------------------------------------------------------------
@@ -192,13 +199,13 @@ def test_two_seeds_in_one_power_on_make_the_multisig_green():
     psbt = _multisig(lambda B, z: _rfc6979_sig(B.key.secret, z, 0x01))
     parts = ur_parts(psbt.serialize())
     script_ = load_seed_script(shots=False) + SEEDSIGNER + [RIGHT, ("blank",)] + parts
-    script_ += [SAME_TXID, ENDING_OK, ("shot", "95_this_seed_clean"), LEFT, WIPE]            # Finish, Wipe
+    script_ += [SAME_TXID, ("shot", "95_this_seed_clean"), LEFT, WIPE]            # Finish, Wipe
     from test_nonceverify_ui import TYPE_SEED, WORDS_12, type_word
     script_ += [FULL, TYPE_SEED, WORDS_12]
     for w in SEED_B.split():
         script_ += type_word(w)
     script_ += [RIGHT, LEFT] + SEEDSIGNER + [RIGHT, ("blank",)] + parts                    # Confirm, None
-    script_ += [SAME_TXID, ENDING_OK, ("shot", "96_both_checked")]
+    script_ += [SAME_TXID, ("shot", "96_both_checked")]
     hw = run(script_)
     assert banner(hw.shots["95_this_seed_clean"]) == ui.YELLOW
     assert banner(hw.shots["96_both_checked"]) == ui.GREEN
@@ -588,3 +595,20 @@ def test_wrong_checksum_shows_the_words():
     screen = SeedReviewScreen(("abandon " * 12).split())
     assert not screen.valid and screen.revealed
     assert screen.buttons[2].label == "Wrong"
+
+
+def test_broadcast_button_only_when_exportable():
+    """ v7.8: the Broadcast button (Tx QR) only on green with every change proven """
+    from types import SimpleNamespace
+    from nonceverify.verify import VERDICT__OK, VERDICT__PARTIAL
+
+    def rep(**kw):
+        base = dict(verdict=VERDICT__OK, broadcast_tx=b"\x02", change_unverified=False, change_warning=False)
+        base.update(kw)
+        return SimpleNamespace(**base)
+    assert app.can_export(rep(), True)
+    assert not app.can_export(rep(), False)                              # txid not confirmed
+    assert app.can_export(rep(change_warning=True), True)                # the button stays, after the warning
+    assert not app.can_export(rep(change_unverified=True), True)
+    assert not app.can_export(rep(verdict=VERDICT__PARTIAL), True)
+    assert not app.can_export(rep(broadcast_tx=None), True)
