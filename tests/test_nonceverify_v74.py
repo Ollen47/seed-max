@@ -51,7 +51,7 @@ def test_splash_layout():
     src = inspect.getsource(app)
     assert "signs nothing" not in src and "tap to start" not in src
     for name, _sub in app.SPLASH_FEATURES:
-        assert name in ("RFC 6979 nonce", "Sighash ALL", "Txid match", "Address check")
+        assert name in ("RFC 6979 nonce", "Sighash ALL", "Txid match", "Address check", "Change check", "Air-gapped")
 
 
 def test_splash_draws_quickly():

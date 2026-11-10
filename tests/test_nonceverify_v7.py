@@ -159,7 +159,9 @@ def test_address_multisig_flow_with_the_descriptor_backup():
     assert banner(hw.shots["63_multisig_change"]) == ui.GREEN, "the descriptor stays for the session"
     assert session.descriptor is not None and session.descriptor.threshold == 2
     session.wipe()
-    assert session.descriptor is None
+    # v7.6: kept across "Change seed" (public, every key verified): the cosigner's seed
+    # checks the same multisig change
+    assert session.descriptor is not None and session.master is None
 
 
 def test_descriptor_of_another_wallet_is_refused():

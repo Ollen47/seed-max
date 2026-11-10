@@ -18,7 +18,8 @@ import time
 from nonceverify import address, crypto, seedqr, storage, transport, ui, wordentry
 from nonceverify.hw import HEIGHT, WIDTH, Event, QRDecoderError, decode_qr
 from nonceverify.psbt import PSBTError, combine_final_tx, has_signatures, parse_psbt, parse_tx
-from nonceverify.verify import (GRIND__EMBIT, GRIND__LIBSECP, GRIND__NONE, STATUS__FAIL, STATUS__FOREIGN,
+from nonceverify.verify import (OWNER__EXTERNAL, OWNER__FAKE, OWNER__OURS, OWNER__UNVERIFIED,
+    GRIND__EMBIT, GRIND__LIBSECP, GRIND__NONE, STATUS__FAIL, STATUS__FOREIGN,
     STATUS__OK, STATUS__UNSIGNED, STATUS__UNVERIFIABLE, VERDICT__FAIL, VERDICT__OK, VERDICT__PARTIAL, verify_psbt)
 
 # The signer under test, chosen by name on the "Seed ready" screen. Each one maps to the
@@ -56,7 +57,7 @@ def show_spaces(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "7.5"
+VERSION = "7.6"
 
 # v7.5: randomness for the checks that must not be predictable (txid ending options, the
 # xpub groups to find on the paper). The OS's CSPRNG; tests swap in a fixed one.
@@ -83,6 +84,8 @@ SPLASH_FEATURES = (
     ("Sighash ALL", "no ANYONECANPAY / NONE"),
     ("Txid match", "broadcast what was checked"),
     ("Address check", "single-sig & multisig"),
+    ("Change check", "your change, proven yours"),      # v7.6 (Ollen)
+    ("Air-gapped", "microSD read-only"),
 )
 
 
@@ -143,13 +146,18 @@ def splash_background():
     p.rounded_rectangle((x1, y1, x2, y2), radius=10, fill=ui.PANEL + (232,), outline=(70, 96, 124, 200), width=1)
     p.line((x1 + 10, y1 + 1, x2 - 10, y1 + 1), fill=(120, 150, 180, 110))
     p.line((WIDTH / 2, y1 + 10, WIDTH / 2, y2 - 10), fill=ui.LINE + (255,))
-    p.line((x1 + 12, (y1 + y2) / 2, x2 - 12, (y1 + y2) / 2), fill=ui.LINE + (255,))
+    rows = (len(SPLASH_FEATURES) + 1) // 2
+    for r in range(1, rows):
+        y = y1 + (y2 - y1) * r / rows
+        p.line((x1 + 12, y, x2 - 12, y), fill=ui.LINE + (255,))
     image.alpha_composite(glass)
     d = ImageDraw.Draw(image)
     f_name, f_sub = ui.font(13, bold=True), ui.font(10)
+    rows = (len(SPLASH_FEATURES) + 1) // 2
+    row_h = (y2 - y1) / rows
     for i, (name, sub) in enumerate(SPLASH_FEATURES):
         fx = x1 + 12 + (i % 2) * (WIDTH / 2 - x1)
-        fy = y1 + 17 + (i // 2) * 34
+        fy = y1 + row_h / 2 + (i // 2) * row_h
         check_mark(d, fx + 7, fy, 6)
         d.text((fx + 19, fy - 5), name, fill=ui.TEXT, font=f_name, anchor="lm")
         d.text((fx + 19, fy + 8), sub, fill=ui.DIM, font=f_sub, anchor="lm")
@@ -172,8 +180,8 @@ class SplashScreen(ui.Screen):
     HORIZON = 150
     EMBLEM_CY = 44
     EMBLEM_SIZE = 76
-    PANEL = (40, 144, 440, 212)
-    START = (140, 229, 340, 271)
+    PANEL = (40, 138, 440, 232)       # v7.6: three rows (six checks)
+    START = (140, 240, 340, 276)
     _background = None
     sd_status = None                  # v7.5: storage.protect_microsd() result, set by main()
 
@@ -206,7 +214,7 @@ class SplashScreen(ui.Screen):
         if self.sd_status:
             writable = self.sd_status == storage.STATUS__WRITABLE
             text = "microSD WRITABLE: remount failed" if writable else f"microSD {self.sd_status}"
-            d.text((WIDTH / 2, 286), text, fill=ui.YELLOW if writable else ui.DIM,
+            d.text((WIDTH / 2, 289), text, fill=ui.YELLOW if writable else ui.DIM,
                    font=ui.font(13, bold=writable, mono=True), anchor="mm")
         return image
 
@@ -605,10 +613,25 @@ class ResultScreen(ui.Screen):
                                 "that could leave with the PSBT file. Broadcast with the Tx QR, don't pass the PSBT "
                                 "on.", ui.font(15), width):
                 add(line, ui.YELLOW, 15)
-        if txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK:
+        if txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK and not report.change_unverified:
             for line in ui.wrap("Broadcast exactly the transaction checked here: Tx QR, then in Sparrow "
                                 "File > Load Transaction > From QR, and broadcast that.", ui.font(16), width):
                 add(line, ui.ACCENT, 16)
+        # v7.6: where the money goes, change proven or not, at the top
+        external = [o for o in report.outputs if o.owner == OWNER__EXTERNAL]
+        ours = [o for o in report.outputs if o.owner == OWNER__OURS]
+        unverified = [o for o in report.outputs if o.owner == OWNER__UNVERIFIED]
+        add(f"Sends {btc(sum(o.amount for o in external))} to {len(external)} other address(es)", ui.TEXT, 17)
+        for o in ours:
+            add(f"Change {btc(o.amount)}: YOURS, {o.label}", ui.GREEN, 17)
+            for line in ui.wrap(o.note, ui.font(15), width) if o.note else []:
+                add(line, ui.YELLOW, 15)
+        for o in unverified:
+            add(f"Maybe NOT yours: {btc(o.amount)} (change not verified)", ui.YELLOW, 17)
+            for line in ui.wrap(o.note, ui.font(15), width):
+                add(line, ui.YELLOW, 15)
+        if not ours and not unverified and report.verdict != VERDICT__FAIL:
+            add("No change back to this wallet", ui.DIM, 15)
         add(f"XFP {report.fingerprint} · {who}", ui.DIM, 15, True)
         add("txid" + (" (same as Sparrow's)" if txid_confirmed else ""), ui.DIM, 15, True)
         for row in txid_rows(report.txid):
@@ -631,17 +654,25 @@ class ResultScreen(ui.Screen):
             for line in ui.wrap(r.message, ui.font(16), WIDTH - 6 * ui.PAD):
                 add(f"     {line}", colors[r.status], 16)
         add("OUTPUTS", ui.DIM, 14, True)
+        tags = {OWNER__OURS: ("YOURS", ui.GREEN), OWNER__UNVERIFIED: ("not verified", ui.YELLOW),
+                OWNER__FAKE: ("NOT YOURS", ui.RED), OWNER__EXTERNAL: ("", ui.TEXT)}
         for o in report.outputs:
-            add(f"#{o.index}  {btc(o.amount)}" + ("  (change)" if o.is_change else ""), ui.TEXT, 17)
-            for chunk in ui.wrap(o.address, ui.font(15, mono=True), WIDTH - 5 * ui.PAD):
-                add(f"     {chunk}", ui.DIM, 15, True)
+            tag, color = tags[o.owner]
+            add(f"#{o.index}  {btc(o.amount)}" + (f"  {tag}" if tag else "") + (f" · {o.label}" if o.label else ""),
+                color, 17)
+            if o.path:
+                add(f"     {o.path}", ui.DIM, 15, True)
+            for chunk in ui.wrap(address.grouped(o.address), ui.font(15, mono=True), WIDTH - 5 * ui.PAD):
+                add(f"     {chunk}", ui.DIM if o.owner == OWNER__EXTERNAL else color, 15, True)
         add(f"Fee: {btc(report.fee)}", ui.TEXT, 17)
         self.list = ui.ScrollList(lines, ui.HEADER_H + self.BANNER_H + 8, HEIGHT - ui.BUTTON_H - 2 * ui.PAD)
         # v7.5 review: only on green. On "this seed clean" the transaction would carry the
         # unchecked cosigner signature, or is not complete
-        self.can_export = bool(txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK)
+        self.can_export = bool(txid_confirmed and report.broadcast_tx and report.verdict == VERDICT__OK
+                               and not report.change_unverified)
         if self.can_export:
-            self.buttons = ui.bottom_row(["Finish", "Tx QR", "Next PSBT"], primary_index=1,
+            self.buttons = ui.bottom_row(["Finish", "Tx QR", "Next PSBT"],
+                                         primary_index=2 if report.change_warning else 1,
                                          values=["done", "txqr", "again"], icons=["power", "qr", "camera"])
         else:
             self.buttons = ui.bottom_row(["Finish", "Next PSBT"], primary_index=1, values=["done", "again"],
@@ -655,6 +686,10 @@ class ResultScreen(ui.Screen):
         """ (color, icon, headline, subline) """
         if self.seed_mismatch():
             return ui.RED, "x_circle", "SEED DOES NOT MATCH", "check seed and passphrase"
+        if self.report.verdict == VERDICT__OK and self.txid_confirmed and self.report.change_unverified:
+            return ui.YELLOW, "warning", "CHANGE NOT VERIFIED", "do not broadcast yet: see below"
+        if self.report.verdict == VERDICT__OK and self.txid_confirmed and self.report.change_warning:
+            return ui.YELLOW, "warning", "NONCE OK · CHANGE?", "your change is somewhere unusual: see below"
         if self.report.verdict == VERDICT__OK and self.txid_confirmed:
             who = signer_name(self.signer) if self.signer in SIGNERS else None
             what = "broadcast the Tx QR" if self.report.broadcast_tx else "broadcast"
@@ -1392,7 +1427,8 @@ class Session:
         # also after "Change seed" (txids are public data)
         self.words = 0
         self.has_passphrase = False
-        self.descriptor = None
+        # v7.6 review: the descriptor is kept (public data, every key of it verified by
+        # derivation or on the paper): the cosigner's seed checks the same multisig change
 
     def set_seed(self, mnemonic: str, passphrase: str):
         if self.master is not None:
@@ -1490,7 +1526,8 @@ def check_psbt(hw, session: Session) -> str:
                 psbt = combine_final_tx(psbt, final)
         working = WorkingScreen(hw)
         report = verify_psbt(psbt, session.master, progress=working, scan_progress=working.scan,
-                             grinding=signer_grinding(session.signer), clean_elsewhere=session.clean_sigs)
+                             grinding=signer_grinding(session.signer), clean_elsewhere=session.clean_sigs,
+                             descriptor=session.descriptor)
     except (PSBTError, ValueError) as e:
         ui.MessageScreen("PSBT not readable", str(e)[:160] + ". Scan it again from Sparrow; if it keeps "
                          "failing, export the PSBT again.", heading_color=ui.RED, icon_name="x_circle").run(hw)

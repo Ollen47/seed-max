@@ -30,7 +30,8 @@ Freedoms that remain even with deterministic nonces, and are checked as well:
 from dataclasses import dataclass, field
 
 from nonceverify import crypto
-from nonceverify.psbt import (PSBT, PSBTError, SCRIPT__P2SH, SCRIPT__P2TR, SCRIPT__P2WPKH,
+from nonceverify.address import ckd_pub
+from nonceverify.psbt import (PSBT, PSBTError, SCRIPT__P2PKH, SCRIPT__P2SH, SCRIPT__P2TR, SCRIPT__P2WPKH,
     SCRIPT__P2WSH, address, bip143_sighash, network_of, p2pkh_script, p2wpkh_script,
     parse_multisig, push, script_type, spent_output)
 
@@ -69,6 +70,14 @@ class InputResult:
     cosigner_sigs: list = field(default_factory=list)   # v7.5: (pubkey, sig) of other keys: valid, ALL, low s
     unsupported: bool = False         # a script type this method can't check (Taproot, legacy)
     stray_bip32: int = 0              # v7.5: BIP32 entries for keys that aren't in the input's script
+    our_paths: list = field(default_factory=list)   # v7.6: paths of this seed's keys in the script (derived)
+    quorum: tuple = None              # v7.6: multisig input: (wrapper type, m, keys in script order, declared bip32)
+
+
+OWNER__EXTERNAL = "external"          # pays someone else (or nothing claims it's ours)
+OWNER__OURS = "ours"                  # v7.6: proven this wallet's: derived from the seed (+ descriptor)
+OWNER__UNVERIFIED = "unverified"      # multisig, our key in it, but no confirmed descriptor to check
+OWNER__FAKE = "fake"                  # declared as this wallet's, but it isn't
 
 
 @dataclass
@@ -77,6 +86,10 @@ class OutputInfo:
     amount: int
     address: str
     is_change: bool
+    owner: str = OWNER__EXTERNAL      # v7.6
+    label: str = ""                   # "change #12", "receive #3"
+    path: str = ""
+    note: str = ""                    # why it's unusual, or why it's refused
 
 
 @dataclass
@@ -97,6 +110,8 @@ class Report:
     unchecked_cosigners: int = 0      # v7.5: cosigner signatures whose nonce no seed has checked yet
     extra_fields: int = 0             # v7.5: unknown / proprietary PSBT fields (not on chain)
     broadcast_tx: bytes = None        # v7.5: the transaction verified here, ready to broadcast
+    change_unverified: bool = False   # v7.6: a multisig change that couldn't be proven: no Tx QR
+    change_warning: bool = False      # v7.6: a change that is yours, somewhere a wallet may not look
 
 
 class InputFail(Exception):
@@ -547,6 +562,10 @@ def _check_input(psbt, index, finder, seen_r, policy, scan_progress):
                 finder.scan_multisig(scan_progress)
                 ours = {pk: finder.by_pubkey[pk] for pk in extra[1] if pk in finder.by_pubkey}
 
+        result.our_paths = [tuple(p) for p in ours.values()]
+        if kind == "wsh":
+            result.quorum = (script_type(utxo.script_pubkey), extra[0], list(extra[1]),
+                             {pk: inp.bip32.get(pk) for pk in extra[1]})
         sigs = _signatures(kind, inp, extra, psbt.tx, index, utxo.value)
         # v7.5 review: BIP32 entries for keys that the script doesn't contain are free bytes
         # (fake pubkeys, long paths): counted with the unknown fields
@@ -607,27 +626,217 @@ def _maybe_ours(finder, inp, utxo) -> bool:
 # ---------------------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------------------
-def _is_change(finder, out, meta) -> bool:
-    """ The output script really pays a key of this seed (derived, not declared) """
-    if meta is None:
-        return False
+FAR_INDEX = 1000          # v7.6: beyond this, a wallet restored from the seed won't look
+MAX_ACCOUNT = 99
+
+
+class WalletContext:
+    """
+    v7.6: what the inputs prove about the wallet, to judge the change against.
+    - single_prefixes: account paths (m/purpose'/coin'/account') of this seed's keys that
+      signed single-sig inputs, from the keys actually verified (not the PSBT's claims).
+    - quorum: for a multisig input of this seed, its script's m, the type and every
+      cosigner xpub. The input's witness script is what our signature commits to
+      (BIP143 scriptCode): its keys are the wallet the coins are in. The PSBT's global
+      xpubs are accepted only if they derive exactly those keys.
+    - descriptor: the one confirmed against the paper in this session, if any.
+    """
+    def __init__(self, psbt, report, descriptor, net):
+        self.net = net
+        self.descriptor = descriptor
+        self.single_prefixes, self.multisig = set(), False
+        self.quorum = None
+        for r in report.inputs:
+            if r.status != STATUS__OK:
+                continue
+            if r.quorum is None:
+                self.single_prefixes.update(p[:-2] for p in r.our_paths if len(p) >= 2)
+            else:
+                self.multisig = True
+                if self.quorum is None:
+                    self.quorum = _resolve_quorum(psbt, r)
+        self._desc_nodes = None
+
+    def descriptor_spk(self, our_key_path, our_fp):
+        """ The confirmed descriptor's script at our key's branch and index, or None """
+        desc = self.descriptor
+        if desc is None:
+            return None
+        for key in desc.keys:
+            origin = list(key.origin_path or [])
+            if key.origin_fingerprint != our_fp or list(our_key_path[:len(origin)]) != origin:
+                continue
+            suffix = list(our_key_path[len(origin):])
+            if not suffix or any(step & H for step in suffix):
+                continue
+            for b in range(desc.branch_count()):
+                if list(key.branches[b]) + ([suffix[-1]] if key.wildcard else []) != suffix:
+                    continue
+                pubs = []
+                for k in desc.keys:
+                    point, chain = k.point, k.chain
+                    for step in list(k.branches[b]) + ([suffix[-1]] if k.wildcard else []):
+                        point, chain = ckd_pub(point, chain, step)
+                    pubs.append(crypto.pubkey_compressed(point))
+                return desc.script_pubkey(b, pubs)
+        return None
+
+
+def _resolve_quorum(psbt, result):
+    """ (wrapper, m, [(xpub point, chain, xpub path)] in script order, sorted?, suffix length) or None """
+    wrapper, m, keys, declared = result.quorum
+    xpubs = []
+    for raw, value in psbt.xpubs.items():
+        path = _parse_xpub_path(value)
+        if len(raw) == 78 and path is not None:
+            try:
+                xpubs.append((value[:4], path, crypto.pubkey_decode(raw[45:]), raw[13:45]))
+            except ValueError:
+                continue
+    resolved, suffix_len = [], None
+    for pk in keys:
+        claim = declared.get(pk)
+        if claim is None:
+            return None
+        fp, path = claim
+        found = None
+        for xfp, xpath, point, chain in xpubs:
+            if xfp != fp or list(path[:len(xpath)]) != list(xpath):
+                continue
+            suffix = list(path[len(xpath):])
+            if not suffix or any(step & H for step in suffix):
+                continue
+            p, c = point, chain
+            for step in suffix:
+                p, c = ckd_pub(p, c, step)
+            if crypto.pubkey_compressed(p) == pk:
+                found = (point, chain, tuple(xpath), len(suffix))
+                break
+        if found is None:
+            return None
+        if suffix_len not in (None, found[3]):
+            return None
+        suffix_len = found[3]
+        resolved.append(found[:3])
+    return wrapper, m, resolved, keys == sorted(keys), suffix_len
+
+
+def _quorum_spk(quorum, suffix):
+    wrapper, m, resolved, is_sorted, suffix_len = quorum
+    if len(suffix) != suffix_len or any(step & H for step in suffix):
+        return None
+    pubs = []
+    for point, chain, _xpath in resolved:
+        p, c = point, chain
+        for step in suffix:
+            p, c = ckd_pub(p, c, step)
+        pubs.append(crypto.pubkey_compressed(p))
+    if is_sorted:
+        pubs.sort()
+    ws = bytes([0x50 + m]) + b"".join(bytes([33]) + pk for pk in pubs) + bytes([0x50 + len(pubs), 0xAE])
+    wsh = b"\x00\x20" + crypto.sha256(ws)
+    if wrapper == SCRIPT__P2SH:
+        return b"\xa9\x14" + crypto.hash160(wsh) + b"\x87"
+    return wsh
+
+
+def _path_notes(path, kind, ctx: WalletContext, single: bool) -> list:
+    """ v7.6 review: where a wallet restored from the seed (or Sparrow) wouldn't look """
+    notes = []
+    coin = 1 if ctx.net == "test" else 0
+    if single:
+        if len(path) != 5:
+            notes.append(f"path depth {len(path)}: not a standard wallet path")
+        else:
+            purpose, coin_type, account, chain, number = path
+            expected = {84 | H: SCRIPT__P2WPKH, 49 | H: SCRIPT__P2SH, 44 | H: SCRIPT__P2PKH}.get(purpose)
+            if expected is None:
+                notes.append(f"purpose {purpose & 0x7FFFFFFF}: not a single-sig wallet path")
+            elif expected != kind:
+                notes.append("script type doesn't match the path: Sparrow won't see these funds")
+            if coin_type != (coin | H):
+                notes.append("coin type of another network")
+            if not account & H or (account & 0x7FFFFFFF) > MAX_ACCOUNT:
+                notes.append(f"account {account & 0x7FFFFFFF}{'' if account & H else ' (not hardened)'}: unusual")
+            if ctx.single_prefixes and tuple(path[:3]) not in ctx.single_prefixes:
+                notes.append("another account or type than the coins spent: check Sparrow sees it")
+    chain, number = path[-2], path[-1]
+    if chain & H or (chain & 0x7FFFFFFF) not in (0, 1):
+        notes.append(f"branch {chain & 0x7FFFFFFF}: not receive or change")
+    if number & H or number > FAR_INDEX:
+        notes.append(f"index {number & 0x7FFFFFFF}: a wallet restored from the seed may not find it")
+    return notes
+
+
+def _classify_output(finder, out, meta, ctx: WalletContext, index: int, net: str) -> OutputInfo:
+    """
+    v7.6 (Ollen, 10 Nov 2026): is the change really this wallet's?
+
+    Single-sig: the output pays a key DERIVED here from the seed at the path the PSBT
+    declares (the key is recomputed, never trusted): the seed can spend it. Notes when
+    it's somewhere a wallet wouldn't look (_path_notes).
+    Multisig: our key in the witness script is not enough (the other keys could be the
+    attacker's, threshold 1). The script must be the wallet's: the descriptor confirmed
+    against the paper, or the same quorum as the multisig coins being spent (their
+    script is signed by our key). A multisig change for a wallet that spends no
+    multisig coin is refused.
+    Declared as ours (our fingerprint, or a key of this seed) but not paying us: FAKE.
+    """
+    info = OutputInfo(index, out.value, address(out.script_pubkey, net), False)
     spk = out.script_pubkey
     kind = script_type(spk)
-    for pk in meta.bip32:
+    claims = meta.bip32 if meta is not None else {}
+    our_fp = finder.master.fingerprint
+    ws = meta.witness_script if meta is not None else None
+    for pk, (_fp, _declared) in claims.items():
         path = finder.by_pubkey.get(pk)
         if path is None:
             continue
-        if kind == SCRIPT__P2WPKH and spk[2:] == crypto.hash160(pk):
-            return True
-        if kind == SCRIPT__P2SH and spk[2:22] == crypto.hash160(p2wpkh_script(pk)):
-            return True
-        ws = meta.witness_script
-        if ws is not None and pk in (parse_multisig(ws) or (0, []))[1]:
-            if kind == SCRIPT__P2WSH and spk[2:] == crypto.sha256(ws):
-                return True
-            if kind == SCRIPT__P2SH and spk[2:22] == crypto.hash160(b"\x00\x20" + crypto.sha256(ws)):
-                return True
-    return False
+        single = ((kind == SCRIPT__P2WPKH and spk[2:] == crypto.hash160(pk)) or
+                  (kind == SCRIPT__P2SH and spk[2:22] == crypto.hash160(p2wpkh_script(pk))) or
+                  (kind == SCRIPT__P2PKH and spk[3:23] == crypto.hash160(pk)))
+        multi = ws is not None and pk in (parse_multisig(ws) or (0, []))[1] and (
+            (kind == SCRIPT__P2WSH and spk[2:] == crypto.sha256(ws)) or
+            (kind == SCRIPT__P2SH and spk[2:22] == crypto.hash160(b"\x00\x20" + crypto.sha256(ws))))
+        if not (single or multi):
+            continue
+        number = path[-1] if path else None
+        chain = path[-2] if len(path) >= 2 else None
+        info.path = crypto.format_path(path)
+        info.label = {0: f"receive #{number}", 1: f"change #{number}"}.get(chain, f"branch {chain} #{number}")
+        if multi:
+            if not ctx.multisig:
+                info.owner = OWNER__FAKE
+                info.note = "a multisig with your key, but the coins spent are single-sig: not your wallet"
+                return info
+            by_desc = ctx.descriptor_spk(path, our_fp)
+            by_quorum = None
+            if ctx.quorum is not None:
+                our = [x for x in ctx.quorum[2] if list(path[:len(x[2])]) == list(x[2])]
+                if our:
+                    by_quorum = _quorum_spk(ctx.quorum, list(path[len(our[0][2]):]))
+            if spk in (by_desc, by_quorum):
+                info.owner = OWNER__OURS
+            elif by_quorum is not None:
+                # the quorum of the coins being spent is known and this isn't it
+                info.owner = OWNER__FAKE
+                info.note = "pays a multisig with your key, but not your wallet's (other keys or threshold)"
+                return info
+            else:
+                info.owner = OWNER__UNVERIFIED
+                info.note = ("multisig: can't be proven yours. Load the descriptor from your backup "
+                             "(Address > Multisig), then scan the PSBT again")
+                return info
+        else:
+            info.owner = OWNER__OURS
+        info.note = "; ".join(_path_notes(path, kind, ctx, single))
+        info.is_change = True
+        return info
+    if any(fp == our_fp for fp, _p in claims.values()) or any(pk in finder.by_pubkey for pk in claims):
+        # v7.6 review: our fingerprint, or a key of this seed, on an output that doesn't pay us
+        info.owner = OWNER__FAKE
+        info.note = "declared as this wallet's, but no key of this seed pays it"
+    return info
 
 
 # ---------------------------------------------------------------------------------------
@@ -720,7 +929,7 @@ def build_broadcast_tx(psbt: PSBT, report: Report):
 
 
 def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=None,
-                grinding: str = GRIND__LIBSECP, clean_elsewhere=frozenset()) -> Report:
+                grinding: str = GRIND__LIBSECP, clean_elsewhere=frozenset(), descriptor=None) -> Report:
     """
     Check every input of `psbt`. `progress(i, n)` is called before each input and
     `scan_progress(i, n)` while looking for a key not found at the PSBT's paths.
@@ -752,10 +961,10 @@ def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=N
                 total_in += result.amount
 
         spent = 0
+        ctx = WalletContext(psbt, report, descriptor, net)
         for index, out in enumerate(psbt.tx.outputs):
             meta = psbt.outputs[index] if index < len(psbt.outputs) else None
-            report.outputs.append(OutputInfo(index, out.value, address(out.script_pubkey, net),
-                                             _is_change(finder, out, meta)))
+            report.outputs.append(_classify_output(finder, out, meta, ctx, index, net))
             spent += out.value
         if known_amounts:
             report.fee = total_in - spent
@@ -794,6 +1003,15 @@ def verify_psbt(psbt: PSBT, master: crypto.HDKey, progress=None, scan_progress=N
                                          if c not in clean_elsewhere)
         report.verdict = VERDICT__PARTIAL if report.unchecked_cosigners else VERDICT__OK
         report.summary = "nonces verified"
+    fake = [o for o in report.outputs if o.owner == OWNER__FAKE]
+    if fake:
+        # v7.6: an output presented as change that isn't this wallet's moves funds away
+        report.verdict = VERDICT__FAIL
+        problem = "; ".join(f"output #{o.index} ({o.note})" for o in fake)
+        report.tx_problem = ((report.tx_problem + " ") if report.tx_problem else "") + \
+            f"NOT YOUR CHANGE: {problem}. Do not broadcast."
+    report.change_unverified = any(o.owner == OWNER__UNVERIFIED for o in report.outputs)
+    report.change_warning = any(o.owner == OWNER__OURS and o.note for o in report.outputs)
     report.extra_fields += sum(r.stray_bip32 for r in report.inputs)
     if report.verdict in (VERDICT__OK, VERDICT__PARTIAL):
         report.broadcast_tx = build_broadcast_tx(psbt, report)

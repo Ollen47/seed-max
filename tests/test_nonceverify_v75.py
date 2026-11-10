@@ -441,10 +441,10 @@ def test_microsd_is_remounted_read_only(tmp_path):
 def test_splash_shows_the_microsd_status(monkeypatch):
     monkeypatch.setattr(app.SplashScreen, "sd_status", storage.STATUS__WRITABLE)
     image = app.SplashScreen().render()
-    assert any(image.getpixel((x, 286)) == ui.YELLOW for x in range(100, 380))
+    assert any(image.getpixel((x, 289)) == ui.YELLOW for x in range(100, 380))
     monkeypatch.setattr(app.SplashScreen, "sd_status", storage.STATUS__READ_ONLY)
     image = app.SplashScreen().render()
-    assert not any(image.getpixel((x, 286)) == ui.YELLOW for x in range(100, 380))
+    assert not any(image.getpixel((x, 289)) == ui.YELLOW for x in range(100, 380))
 
 
 def test_import_guard_blocks_the_modules_that_write_the_card():
