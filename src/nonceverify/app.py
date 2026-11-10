@@ -57,7 +57,7 @@ def show_spaces(text: str) -> str:
 
 logger = logging.getLogger(__name__)
 
-VERSION = "7.6"
+VERSION = "7.7"
 
 # v7.5: randomness for the checks that must not be predictable (txid ending options, the
 # xpub groups to find on the paper). The OS's CSPRNG; tests swap in a fixed one.
@@ -386,11 +386,10 @@ class ScanScreen:
     PREVIEW = 320
     LEFT = (WIDTH - PREVIEW) // 2
 
-    def __init__(self, heading: str, handle_payload, errors=(), private: bool = False):
+    def __init__(self, heading: str, handle_payload, errors=()):
         self.heading = heading
-        # v7.5: a SeedQR is a seed: the preview is shown as a coarse mosaic, enough to aim
-        # the camera, useless to a phone filming the screen
-        self.private = private
+        # v7.7 (Ollen): no mosaic anywhere. A camera filming the screen would film the
+        # SeedQR on the paper too: the preview is always the plain camera image.
         self.handle_payload = handle_payload       # payload -> (done: bool, progress: float, note)
         self.errors = (transport.TransportError, seedqr.SeedQRError) + tuple(errors)
         self.back = ui.Button((4, 200, self.LEFT - 4, 280), "", value="back", size=22, icon_name="back")
@@ -404,10 +403,7 @@ class ScanScreen:
         d.rectangle((0, 0, self.LEFT - 1, HEIGHT), fill=ui.PANEL)
         d.rectangle((self.LEFT + self.PREVIEW, 0, WIDTH, HEIGHT), fill=ui.PANEL)
         if frame is not None:
-            if self.private:
-                from PIL import Image
-                frame = frame.resize((10, 10)).resize((self.PREVIEW, self.PREVIEW), Image.NEAREST)
-            elif frame.size != (self.PREVIEW, self.PREVIEW):
+            if frame.size != (self.PREVIEW, self.PREVIEW):
                 frame = frame.resize((self.PREVIEW, self.PREVIEW))
             image.paste(frame, (self.LEFT, 0))
         # corner brackets of the viewfinder
@@ -1458,7 +1454,7 @@ def load_seed(hw, session: Session, method: str = "scan_seed") -> bool:
             found["mnemonic"] = seedqr.decode(payload)
             return True, 1.0, ""
 
-        if ScanScreen("SeedQR", on_payload, private=True).run(hw) is None:
+        if ScanScreen("SeedQR", on_payload).run(hw) is None:
             return False
         mnemonic = found.pop("mnemonic")
     words = len(mnemonic.split())

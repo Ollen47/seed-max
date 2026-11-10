@@ -484,15 +484,16 @@ def test_seed_words_and_passphrase_hidden_until_show():
     assert not p.revealed and p.on_event(Event(Event.TAP, 240, 288)) == "__redraw__" and p.revealed
 
 
-def test_seedqr_preview_is_a_mosaic():
-    from PIL import Image
+def test_seedqr_preview_is_the_plain_camera_image():
+    """ v7.7 (Ollen, 10 Nov 2026): no mosaic in any function; the preview is the camera image """
+    import inspect
     import qrcode
+    assert "private" not in inspect.signature(app.ScanScreen).parameters
     q = qrcode.make("0123456789012345678901234567890123456789").convert("RGB").resize((320, 320))
-    screen = app.ScanScreen("SeedQR", lambda p: (False, 0, ""), private=True)
+    screen = app.ScanScreen("SeedQR", lambda p: (False, 0, ""))
     image = screen.compose(q)
     crop = image.crop((screen.LEFT, 0, screen.LEFT + 320, 320))
-    assert len(set(crop.getdata())) <= 100 + 5, "a coarse mosaic, no readable modules"
-    assert _zbar(crop) is None
+    assert _zbar(crop) is not None, "the QR on screen is the QR in front of the camera"
 
 
 def test_numpad_returns_digits_only():
